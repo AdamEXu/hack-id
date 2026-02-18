@@ -83,6 +83,12 @@ window.addEventListener('popstate', (e) => {
 // Permission metadata (from static/permissions.json) - cached after first load
 let permissionMetadata = { permissions: {}, categories: {} };
 let permissionMetadataLoaded = false;
+let appAccessEntries = [];
+let appEventsCatalog = [];
+let appsCatalog = [];
+let appsPageInitialized = false;
+let appsSearchTerm = '';
+let appsStatusFilter = 'all';
 
 async function ensurePermissionMetadata() {
     if (permissionMetadataLoaded) return permissionMetadata;
@@ -225,10 +231,11 @@ async function loadPageContent(pageName) {
 
     // Handle apps page
     if (pageName === 'apps') {
-        if ($.fn.DataTable.isDataTable('#apps-table')) {
-            return; // Already initialized
+        if (!appsPageInitialized) {
+            loadAppsPage();
+        } else {
+            await refreshAppsCatalog();
         }
-        loadAppsPage();
         return;
     }
 
@@ -832,113 +839,171 @@ function loadAdminsPage() {
 function loadAppsPage() {
     const pageElement = document.getElementById('page-apps');
     pageElement.innerHTML = `
-        <div class="page-header">
-            <h1>OAuth 2.0 Apps</h1>
-            <button class="btn-primary" id="add-app-btn">Add App</button>
+        <div class="apps-shell">
+            <div class="apps-toolbar">
+                <div>
+                    <h1>OAuth Apps</h1>
+                    <p class="text-muted">Manage app metadata, access controls, and credentials.</p>
+                </div>
+                <button class="btn-primary" id="add-app-btn">New App</button>
+            </div>
+
+            <div class="apps-filters">
+                <input type="text" id="apps-search" placeholder="Search apps by name, client ID, or owner" />
+                <div class="apps-filter-buttons">
+                    <button class="btn-secondary app-filter-btn active" data-filter="all">All</button>
+                    <button class="btn-secondary app-filter-btn" data-filter="active">Active</button>
+                    <button class="btn-secondary app-filter-btn" data-filter="inactive">Inactive</button>
+                </div>
+            </div>
+
+            <div id="apps-list" class="apps-list"></div>
         </div>
-        <table id="apps-table" class="display table-full-width">
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Icon</th>
-                    <th>Client ID</th>
-                    <th>Redirect URIs</th>
-                    <th>Scopes</th>
-                    <th>Created By</th>
-                    <th>Allow Anyone</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-        </table>
     `;
 
     // Add event listener for Add App button
     document.getElementById('add-app-btn').addEventListener('click', showAddAppModal);
-
-    // Initialize DataTable
-    $('#apps-table').DataTable({
-        ajax: {
-            url: '/admin/apps/data',
-            dataSrc: 'data'
-        },
-        columns: [
-            { data: 'name' },
-            {
-                data: 'icon',
-                render: function(data) {
-                    return data || '';
-                }
-            },
-            {
-                data: 'client_id',
-                render: function(data) {
-                    if (!data) return '<span class="text-muted">Legacy</span>';
-                    return `<code class="code-small">${data.substring(0, 20)}...</code>`;
-                }
-            },
-            {
-                data: 'redirect_uris',
-                render: function(data) {
-                    if (!data) return '<span class="text-muted">N/A</span>';
-                    try {
-                        const uris = JSON.parse(data);
-                        if (uris.length === 0) return '<span class="text-muted">None</span>';
-                        if (uris.length === 1) return uris[0];
-                        return `${uris[0]} <span class="text-muted">(+${uris.length - 1} more)</span>`;
-                    } catch {
-                        return data;
-                    }
-                }
-            },
-            {
-                data: 'allowed_scopes',
-                render: function(data) {
-                    if (!data) return '<span class="text-muted">N/A</span>';
-                    try {
-                        const scopes = JSON.parse(data);
-                        return scopes.join(', ');
-                    } catch {
-                        return data;
-                    }
-                }
-            },
-            { data: 'created_by' },
-            {
-                data: 'allow_anyone',
-                render: function(data) {
-                    return data ? '<span class="text-cyan">Yes</span>' : '<span class="text-muted">No</span>';
-                }
-            },
-            {
-                data: 'is_active',
-                render: function(data) {
-                    return data ? '<span class="status-active">Active</span>' : '<span class="status-inactive">Inactive</span>';
-                }
-            },
-            {
-                data: 'id',
-                render: function(data) {
-                    return `
-                        <button class="btn-secondary btn-edit-app" data-app-id="${data}">Edit</button>
-                        <button class="btn-danger btn-delete-app" data-app-id="${data}">Delete</button>
-                    `;
-                }
-            }
-        ],
-        pageLength: 25,
-        order: [[0, 'asc']]
+    document.getElementById('apps-search').addEventListener('input', (event) => {
+        appsSearchTerm = event.target.value.trim().toLowerCase();
+        renderAppsList();
     });
 
-    // Event delegation for dynamically created buttons
-    $('#apps-table').on('click', '.btn-edit-app', function() {
-        const appId = $(this).data('app-id');
-        editApp(appId);
+    document.querySelectorAll('.app-filter-btn').forEach(button => {
+        button.addEventListener('click', () => {
+            appsStatusFilter = button.dataset.filter || 'all';
+            document.querySelectorAll('.app-filter-btn').forEach(btn => btn.classList.remove('active'));
+            button.classList.add('active');
+            renderAppsList();
+        });
     });
 
-    $('#apps-table').on('click', '.btn-delete-app', function() {
-        const appId = $(this).data('app-id');
-        deleteApp(appId);
+    appsPageInitialized = true;
+    refreshAppsCatalog();
+}
+
+function parseJsonList(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) return value;
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+async function refreshAppsCatalog() {
+    const listElement = document.getElementById('apps-list');
+    if (!listElement) return;
+
+    try {
+        listElement.innerHTML = '<div class="loading">Loading apps...</div>';
+        const response = await secureFetch('/admin/apps/data');
+        if (response.status === 403) {
+            listElement.innerHTML = '<p class="muted">You do not have permission to view apps.</p>';
+            return;
+        }
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to load apps');
+        }
+        appsCatalog = (data.data || []).map(app => ({
+            ...app,
+            redirect_uris_list: parseJsonList(app.redirect_uris),
+            allowed_scopes_list: parseJsonList(app.allowed_scopes),
+            app_type: app.app_type || 'oauth',
+            skip_consent_screen: Boolean(app.skip_consent_screen),
+        }));
+        renderAppsList();
+    } catch (error) {
+        listElement.innerHTML = `<p class="muted">Failed to load apps: ${error.message}</p>`;
+    }
+}
+
+function getFilteredApps() {
+    return appsCatalog.filter(app => {
+        if (appsStatusFilter === 'active' && !app.is_active) return false;
+        if (appsStatusFilter === 'inactive' && app.is_active) return false;
+
+        if (!appsSearchTerm) return true;
+        const haystack = [
+            app.name,
+            app.client_id,
+            app.created_by,
+            ...(app.redirect_uris_list || []),
+        ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+        return haystack.includes(appsSearchTerm);
+    });
+}
+
+function appRowBadges(app) {
+    const badges = [];
+    badges.push(app.is_active ? '<span class="app-badge app-badge-active">Active</span>' : '<span class="app-badge app-badge-inactive">Inactive</span>');
+    badges.push(app.allow_anyone ? '<span class="app-badge app-badge-open">All Users</span>' : '<span class="app-badge app-badge-restricted">Restricted</span>');
+    if (app.skip_consent_screen) {
+        badges.push('<span class="app-badge app-badge-internal">Skip Consent</span>');
+    }
+    badges.push(`<span class="app-badge app-badge-type">${app.app_type.toUpperCase()}</span>`);
+    return badges.join('');
+}
+
+function renderAppsList() {
+    const listElement = document.getElementById('apps-list');
+    if (!listElement) return;
+
+    const filteredApps = getFilteredApps();
+    if (!filteredApps.length) {
+        listElement.innerHTML = '<div class="apps-empty">No apps match your filters.</div>';
+        return;
+    }
+
+    listElement.innerHTML = filteredApps.map(app => {
+        const icon = app.icon || '🔗';
+        const scopes = (app.allowed_scopes_list || []).map(scope => `<span class="permission-pill">${scope}</span>`).join('');
+        const redirectPreview = app.redirect_uris_list && app.redirect_uris_list.length
+            ? app.redirect_uris_list[0]
+            : 'No redirect URI configured';
+        const extraRedirects = Math.max((app.redirect_uris_list || []).length - 1, 0);
+        const extraText = extraRedirects > 0 ? `<span class="text-muted"> +${extraRedirects} more</span>` : '';
+
+        return `
+            <div class="app-card" data-app-id="${app.id}">
+                <div class="app-card-main">
+                    <div class="app-card-head">
+                        <div class="app-icon">${icon}</div>
+                        <div class="app-title-wrap">
+                            <h3>${app.name || 'Unnamed App'}</h3>
+                            <div class="app-meta">
+                                <code>${app.client_id || 'legacy-app'}</code>
+                                <span>Owner: ${app.created_by || 'unknown'}</span>
+                            </div>
+                        </div>
+                        <div class="app-badges">${appRowBadges(app)}</div>
+                    </div>
+                    <div class="app-card-body">
+                        <p class="app-redirect">
+                            <span class="text-muted">Redirect:</span>
+                            <code>${redirectPreview}</code>${extraText}
+                        </p>
+                        <div class="app-scopes-line">${scopes || '<span class="text-muted">No scopes</span>'}</div>
+                    </div>
+                </div>
+                <div class="app-card-actions">
+                    <button class="btn-secondary app-action-edit" data-app-id="${app.id}">Edit</button>
+                    <button class="btn-danger app-action-delete" data-app-id="${app.id}">Delete</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    listElement.querySelectorAll('.app-action-edit').forEach(button => {
+        button.addEventListener('click', () => editApp(button.dataset.appId));
+    });
+    listElement.querySelectorAll('.app-action-delete').forEach(button => {
+        button.addEventListener('click', () => deleteApp(button.dataset.appId));
     });
 }
 
@@ -1104,6 +1169,63 @@ $(document).ready(function() {
             showToast('Copied', false);
         });
     });
+
+    $('#app-access-add-email-btn').on('click', function() {
+        const input = document.getElementById('app-access-email-input');
+        const email = normalizeEmail(input.value);
+        if (!email) {
+            showToast('Enter an email to add', true);
+            return;
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            showToast('Invalid email address', true);
+            return;
+        }
+        addAccessEntry({
+            principal_type: 'email',
+            principal_ref: email,
+            display_label: email,
+        });
+        input.value = '';
+    });
+    $('#app-access-email-input').on('keydown', function(event) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            $('#app-access-add-email-btn').trigger('click');
+        }
+    });
+
+    $('#app-access-add-admins-btn').on('click', function() {
+        addAccessEntry({
+            principal_type: 'group_admins',
+            principal_ref: 'all_admins',
+            display_label: 'All admins',
+        });
+    });
+
+    $('#app-access-add-event-btn').on('click', function() {
+        const select = document.getElementById('app-access-event-select');
+        const eventId = select.value;
+        if (!eventId) {
+            showToast('Select an event group first', true);
+            return;
+        }
+        const selectedOption = select.options[select.selectedIndex];
+        addAccessEntry({
+            principal_type: 'group_event_attendees',
+            principal_ref: eventId,
+            display_label: `All attendees: ${selectedOption.textContent}`,
+        });
+    });
+
+    $(document).on('click', '#app-access-chip-list button[data-access-index]', function() {
+        const index = parseInt(this.dataset.accessIndex, 10);
+        removeAccessEntryByIndex(index);
+    });
+
+    $('#app-allow-anyone').on('change', function() {
+        renderAppAccessChips();
+    });
 });
 
 function removeAdmin(email) {
@@ -1203,45 +1325,24 @@ function showPermissionsModal(email) {
 
             html += `</div>`;
 
-            // Apps section - fetch apps dynamically
+            // Legacy app permissions section (non-runtime)
             html += `<div class="permission-group">
-                <h3>Apps</h3>
-                <div id="apps-permissions-loading">Loading apps...</div>
+                <h3>Apps (Legacy)</h3>
+                <p class="text-small">Per-admin app permissions are retained for historical visibility only and are not used in runtime app access checks.</p>
+                <div id="legacy-app-permissions"></div>
             </div>`;
 
             content.innerHTML = html;
 
-            // Fetch apps and add to permissions
-            secureFetch('/admin/apps/data')
-                .then(r => r.json())
-                .then(appsData => {
-                    const appsContainer = content.querySelector('#apps-permissions-loading').parentElement;
-                    let appsHtml = '<h3>Apps</h3>';
-
-                    if (appsData.data && appsData.data.length > 0) {
-                        appsData.data.forEach(app => {
-                            appsHtml += `<div class="permission-item">
-                                <label class="permission-label">${app.name}</label>
-                                <div class="permission-access">
-                                    <label><input type="checkbox" class="access-read" data-type="app" data-value="${app.id}"> Read</label>
-                                    <label><input type="checkbox" class="access-write" data-type="app" data-value="${app.id}"> Write</label>
-                                </div>
-                            </div>`;
-                        });
-                    } else {
-                        appsHtml += '<p class="muted">No apps available</p>';
-                    }
-
-                    appsContainer.innerHTML = appsHtml;
-
-                    // Re-check existing permissions after apps are loaded
-                    permissions.forEach(perm => {
-                        const checkbox = content.querySelector(`input[data-type="${perm.permission_type}"][data-value="${perm.permission_value}"].access-${perm.access_level}`);
-                        if (checkbox) {
-                            checkbox.checked = true;
-                        }
-                    });
-                });
+            const legacyAppPerms = permissions.filter(perm => perm.permission_type === 'app');
+            const legacyContainer = content.querySelector('#legacy-app-permissions');
+            if (legacyAppPerms.length === 0) {
+                legacyContainer.innerHTML = '<p class="muted">No legacy app permissions assigned.</p>';
+            } else {
+                legacyContainer.innerHTML = legacyAppPerms
+                    .map(perm => `<span class="permission-pill">${perm.permission_value} (${perm.access_level})</span>`)
+                    .join('');
+            }
 
             // Check existing permissions for events and pages (before apps are loaded)
             permissions.forEach(perm => {
@@ -1289,14 +1390,147 @@ function savePermissions() {
     });
 }
 
+function normalizeEmail(value) {
+    return (value || '').trim().toLowerCase();
+}
+
+function renderAppAccessChips() {
+    const list = document.getElementById('app-access-chip-list');
+    if (!list) return;
+
+    if (!appAccessEntries.length) {
+        list.innerHTML = '<p class="muted">No access principals added.</p>';
+    } else {
+        list.innerHTML = appAccessEntries.map((entry, index) => {
+            const isGroup = entry.principal_type !== 'email';
+            const icon = isGroup ? 'group' : 'person';
+            const label = isGroup ? entry.display_label : entry.principal_ref;
+            const kindClass = isGroup ? 'access-chip-group' : 'access-chip-email';
+            return `
+                <span class="access-chip ${kindClass}">
+                    <span class="material-icons">${icon}</span>
+                    <span>${label}</span>
+                    <button type="button" data-access-index="${index}" aria-label="Remove access principal">&times;</button>
+                </span>
+            `;
+        }).join('');
+    }
+
+    const warning = document.getElementById('app-access-warning');
+    if (!warning) return;
+    const allowAnyone = document.getElementById('app-allow-anyone')?.checked;
+    if (!allowAnyone && appAccessEntries.length === 0) {
+        warning.classList.remove('hidden');
+        warning.textContent = 'Restricted app with empty ACL: only universal-write admins can recover access.';
+    } else {
+        warning.classList.add('hidden');
+        warning.textContent = '';
+    }
+}
+
+function addAccessEntry(entry) {
+    const exists = appAccessEntries.some(existing =>
+        existing.principal_type === entry.principal_type &&
+        existing.principal_ref === entry.principal_ref
+    );
+    if (exists) {
+        showToast('Principal already added', true);
+        return;
+    }
+    appAccessEntries.push(entry);
+    renderAppAccessChips();
+}
+
+function removeAccessEntryByIndex(index) {
+    appAccessEntries = appAccessEntries.filter((_, idx) => idx !== index);
+    renderAppAccessChips();
+}
+
+async function ensureAppEventsCatalog() {
+    if (appEventsCatalog.length) return appEventsCatalog;
+    const response = await secureFetch('/static/events.json');
+    const data = await response.json();
+    appEventsCatalog = Object.entries(data)
+        .filter(([eventId]) => !eventId.startsWith('_'))
+        .map(([eventId, eventData]) => ({
+            id: eventId,
+            name: eventData.name || eventId
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    return appEventsCatalog;
+}
+
+async function populateEventGroupSelect() {
+    const eventSelect = document.getElementById('app-access-event-select');
+    if (!eventSelect) return;
+
+    try {
+        const events = await ensureAppEventsCatalog();
+        eventSelect.innerHTML = '<option value="">Select event group…</option>';
+        events.forEach(eventItem => {
+            const option = document.createElement('option');
+            option.value = eventItem.id;
+            option.textContent = `${eventItem.name} (${eventItem.id})`;
+            eventSelect.appendChild(option);
+        });
+    } catch (error) {
+        showToast('Failed to load event groups', true);
+    }
+}
+
+function getAppAccessPayload() {
+    return appAccessEntries.map(entry => ({
+        principal_type: entry.principal_type,
+        principal_ref: entry.principal_ref
+    }));
+}
+
+async function saveAppAccessEntries(appId) {
+    const response = await secureFetch(`/admin/apps/${appId}/access`, {
+        method: 'PUT',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ entries: getAppAccessPayload() }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        const reason = data.reason ? ` (${data.reason})` : '';
+        throw new Error((data.error || 'Failed to save ACL entries') + reason);
+    }
+}
+
+async function loadAppAccessEntries(appId) {
+    const response = await secureFetch(`/admin/apps/${appId}/access`);
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to load app access entries');
+    }
+
+    appAccessEntries = (data.entries || []).map(entry => ({
+        principal_type: entry.principal_type,
+        principal_ref: entry.principal_ref,
+        display_label: entry.display_label || entry.principal_ref,
+    }));
+    renderAppAccessChips();
+}
+
 function showAddAppModal() {
     document.getElementById('app-modal-title').textContent = 'Add OAuth 2.0 App';
+    const subtitle = document.querySelector('#app-modal .app-modal-subtitle');
+    if (subtitle) subtitle.textContent = 'Create a new OAuth app and define launch access before publishing.';
+    const saveButton = document.getElementById('save-app-btn');
+    if (saveButton) saveButton.textContent = 'Create App';
     document.getElementById('app-id').value = '';
     document.getElementById('app-name').value = '';
     document.getElementById('app-icon').value = '';
     document.getElementById('app-redirect-uris').value = '';
     document.getElementById('app-allow-anyone').checked = false;
     document.getElementById('app-skip-consent').checked = false;
+    document.getElementById('app-access-email-input').value = '';
+    appAccessEntries = [];
+    renderAppAccessChips();
+    populateEventGroupSelect();
 
     // Hide credentials section for new apps
     const credentials = document.getElementById('app-credentials');
@@ -1309,70 +1543,46 @@ function showAddAppModal() {
 }
 
 function editApp(appId) {
-    // Fetch app details
-    secureFetch(`/admin/apps/data`)
-        .then(r => {
-            if (r.status === 403) {
-                showToast('You don\'t have permission to edit apps', true);
-                throw new Error('Permission denied');
-            }
-            return r.json();
-        })
-        .then(data => {
-            const app = data.data.find(a => a.id === appId);
-            if (!app) {
-                showToast('App not found', true);
-                return;
-            }
+    const app = appsCatalog.find(a => a.id === appId);
+    if (!app) {
+        showToast('App not found. Refreshing list...', true);
+        refreshAppsCatalog();
+        return;
+    }
 
-            document.getElementById('app-modal-title').textContent = 'Edit OAuth 2.0 App';
-            document.getElementById('app-id').value = app.id;
-            document.getElementById('app-name').value = app.name;
-            document.getElementById('app-icon').value = app.icon || '';
+    document.getElementById('app-modal-title').textContent = 'Edit OAuth 2.0 App';
+    const subtitle = document.querySelector('#app-modal .app-modal-subtitle');
+    if (subtitle) subtitle.textContent = 'Update credentials, scopes, and access policies for this app.';
+    const saveButton = document.getElementById('save-app-btn');
+    if (saveButton) saveButton.textContent = 'Save Changes';
+    document.getElementById('app-id').value = app.id;
+    document.getElementById('app-name').value = app.name;
+    document.getElementById('app-icon').value = app.icon || '';
+    document.getElementById('app-redirect-uris').value = (app.redirect_uris_list || []).join('\n');
+    document.getElementById('app-allow-anyone').checked = app.allow_anyone;
+    document.getElementById('app-skip-consent').checked = app.skip_consent_screen || false;
+    document.getElementById('app-access-email-input').value = '';
 
-            // Handle redirect URIs
-            if (app.redirect_uris) {
-                try {
-                    const uris = JSON.parse(app.redirect_uris);
-                    document.getElementById('app-redirect-uris').value = uris.join('\n');
-                } catch {
-                    document.getElementById('app-redirect-uris').value = '';
-                }
-            } else {
-                document.getElementById('app-redirect-uris').value = '';
-            }
+    const credentials = document.getElementById('app-credentials');
+    if (app.client_id) {
+        credentials.classList.remove('hidden');
+        document.getElementById('app-client-id').value = app.client_id;
+        document.getElementById('app-client-secret').value = app.client_secret || '';
+        document.getElementById('app-client-secret').type = 'password';
+    } else {
+        credentials.classList.add('hidden');
+    }
 
-            document.getElementById('app-allow-anyone').checked = app.allow_anyone;
-            document.getElementById('app-skip-consent').checked = app.skip_consent_screen || false;
-
-            // Show credentials if they exist
-            const credentials = document.getElementById('app-credentials');
-            if (app.client_id) {
-                credentials.classList.remove('hidden');
-                document.getElementById('app-client-id').value = app.client_id;
-                document.getElementById('app-client-secret').value = app.client_secret || '';
-                document.getElementById('app-client-secret').type = 'password';
-            } else {
-                credentials.classList.add('hidden');
-            }
-
-            // Load scopes
-            const scopes = app.allowed_scopes ? JSON.parse(app.allowed_scopes) : [];
-            loadAppScopes(scopes);
-
-            openModal('app-modal');
-        })
-        .catch(error => {
-            // Session expired and permission denied errors already shown
-            if (error.message !== 'Session expired' &&
-                error.message !== 'CSRF token is missing' &&
-                error.message !== 'Permission denied') {
-                showToast('Failed to load app details: ' + error.message, true);
-            }
+    loadAppScopes(app.allowed_scopes_list || []);
+    populateEventGroupSelect()
+        .then(() => loadAppAccessEntries(app.id))
+        .then(() => openModal('app-modal'))
+        .catch((error) => {
+            showToast(`Failed to load app access: ${error.message}`, true);
         });
 }
 
-function saveApp() {
+async function saveApp() {
     const appId = document.getElementById('app-id').value;
     const name = document.getElementById('app-name').value.trim();
     const icon = document.getElementById('app-icon').value.trim();
@@ -1403,49 +1613,49 @@ function saveApp() {
         return;
     }
 
-    const method = appId ? 'PUT' : 'POST';
-    const url = appId ? `/admin/apps/${appId}` : '/admin/apps';
+    try {
+        const method = appId ? 'PUT' : 'POST';
+        const url = appId ? `/admin/apps/${appId}` : '/admin/apps';
 
-    secureFetch(url, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            name,
-            icon,
-            redirect_uris: redirectUris,
-            allowed_scopes: selectedScopes,
-            allow_anyone: allowAnyone,
-            skip_consent_screen: skipConsent
-        })
-    })
-    .then(r => {
-        if (r.status === 403) {
-            showToast('You don\'t have permission to ' + (appId ? 'edit' : 'create') + ' apps', true);
-            throw new Error('Permission denied');
+        const appResponse = await secureFetch(url, {
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                name,
+                icon,
+                redirect_uris: redirectUris,
+                allowed_scopes: selectedScopes,
+                allow_anyone: allowAnyone,
+                skip_consent_screen: skipConsent
+            })
+        });
+        if (appResponse.status === 403) {
+            showToast(`You don't have permission to ${appId ? 'edit' : 'create'} apps`, true);
+            return;
         }
-        return r.json();
-    })
-    .then(data => {
-        if (data.success) {
-            showToast(appId ? 'App updated successfully' : 'App created successfully');
-            closeModal('app-modal');
-            if ($.fn.DataTable.isDataTable('#apps-table')) {
-                $('#apps-table').DataTable().ajax.reload();
-            }
-        } else {
-            showToast(data.error || 'Failed to save app', true);
+
+        const appData = await appResponse.json();
+        if (!appData.success) {
+            showToast(appData.error || 'Failed to save app', true);
+            return;
         }
-    })
-    .catch(error => {
+
+        const targetAppId = appId || appData.app_id;
+        await saveAppAccessEntries(targetAppId);
+
+        showToast(appId ? 'App updated successfully' : 'App created successfully');
+        closeModal('app-modal');
+        await refreshAppsCatalog();
+    } catch (error) {
         // Session expired and permission denied errors already shown
         if (error.message !== 'Session expired' &&
             error.message !== 'CSRF token is missing' &&
             error.message !== 'Permission denied') {
             showToast('Failed to save app: ' + error.message, true);
         }
-    });
+    }
 }
 
 function deleteApp(appId) {
@@ -1464,7 +1674,7 @@ function deleteApp(appId) {
     .then(data => {
         if (data.success) {
             showToast('App deleted successfully');
-            $('#apps-table').DataTable().ajax.reload();
+            refreshAppsCatalog();
         } else {
             showToast(data.error || 'Failed to delete app', true);
         }
@@ -1492,20 +1702,28 @@ function loadAppScopes(selectedScopes = []) {
                 const isRequired = scope.required;
 
                 const scopeDiv = document.createElement('div');
-                scopeDiv.className = 'permission-item';
+                scopeDiv.className = 'scope-card';
                 scopeDiv.innerHTML = `
-                    <label style="display: flex; align-items: center; cursor: pointer;">
+                    <label>
                         <input type="checkbox"
                                value="${scope.name}"
                                ${isChecked ? 'checked' : ''}
-                               ${isRequired ? 'disabled checked' : ''}
-                               style="margin-right: 10px;">
+                               ${isRequired ? 'disabled checked' : ''}>
                         <div>
-                            <strong>${scope.name}</strong>
-                            <div style="font-size: 0.85em; color: #888;">${scope.description}</div>
+                            <strong>${scope.name}${isRequired ? '<span class="scope-required-pill">Required</span>' : ''}</strong>
+                            <small>${scope.description}</small>
                         </div>
                     </label>
                 `;
+                const checkbox = scopeDiv.querySelector('input[type="checkbox"]');
+                if (checkbox?.checked) {
+                    scopeDiv.classList.add('scope-card-selected');
+                }
+                if (checkbox) {
+                    checkbox.addEventListener('change', () => {
+                        scopeDiv.classList.toggle('scope-card-selected', checkbox.checked);
+                    });
+                }
                 scopesContainer.appendChild(scopeDiv);
             });
         })
