@@ -26,10 +26,10 @@ Authorization: Bearer hack.sv.{YOUR_API_KEY}
 
 ### OAuth Integration
 
--   **Endpoint**: `/oauth` and `/api/oauth/user-info`
--   **Purpose**: External application authentication and user data retrieval
+-   **Endpoints**: `/oauth/authorize`, `/oauth/token`, `/api/oauth/user-info` (GET)
+-   **Purpose**: OAuth 2.0 authorization code flow for external app authentication and user data retrieval
 -   **Documentation**: [OAuth API](./oauth.md)
--   **Required Permission**: `oauth`
+-   **Required Permission**: None for OAuth 2.0 user info (Bearer access token from `/oauth/token`)
 
 ### Event Registration
 
@@ -64,10 +64,6 @@ API keys can be configured with the following permissions:
 -   `users.read` - Read user information and status
 -   `users.write` - Modify user data
 -   `users.delete` - Delete user accounts and data
-
-### OAuth
-
--   `oauth` - OAuth flow integration and user info retrieval
 
 ### Admin
 

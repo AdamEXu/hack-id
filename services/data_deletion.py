@@ -6,6 +6,11 @@ from utils.database import get_db_connection
 from models.user import get_user_by_email
 from config import DEBUG_MODE
 from services.listmonk_service import delete_subscriber_by_email
+from services.app_access_service import (
+    delete_acl_entries_for_email,
+    count_acl_entries_for_email,
+)
+from utils.validation import normalize_email
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -16,6 +21,7 @@ def get_user_data_summary(user_email: str) -> Dict[str, Any]:
     Get a summary of all data associated with a user.
     Used to show users what will be deleted.
     """
+    user_email = normalize_email(user_email)
     conn = get_db_connection()
 
     summary = {
@@ -125,9 +131,11 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
     Returns:
         Dict with deletion results and summary
     """
+    normalized_email = normalize_email(user_email)
+
     result = {
         "success": False,
-        "user_email": user_email,
+        "user_email": normalized_email,
         "deleted_from_tables": [],
         "deletion_counts": {},
         "discord_result": None,
@@ -138,7 +146,7 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
 
     try:
         # Get user data summary first
-        summary = get_user_data_summary(user_email)
+        summary = get_user_data_summary(normalized_email)
 
         if not summary["user_found"]:
             result["errors"].append("User not found")
@@ -146,7 +154,7 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
 
         # Remove Discord roles FIRST (before deleting user data from database)
         if include_discord and summary.get("discord_linked"):
-            discord_result = remove_discord_roles(user_email)
+            discord_result = remove_discord_roles(normalized_email)
             result["discord_result"] = discord_result
 
             if (
@@ -157,7 +165,7 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
 
         # Delete from Listmonk mailing list
         if include_listmonk:
-            listmonk_result = delete_subscriber_by_email(user_email)
+            listmonk_result = delete_subscriber_by_email(normalized_email)
             result["listmonk_result"] = listmonk_result
 
             if not listmonk_result["success"] and not listmonk_result.get("skipped", False):
@@ -171,7 +179,7 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
 
         # Delete from ephemeral tables in SQLite
         ephemeral_tables = [
-            ("opt_out_tokens", "user_email", user_email),
+            ("opt_out_tokens", "user_email", normalized_email),
         ]
 
         for table_name, column_name, value in ephemeral_tables:
@@ -200,17 +208,27 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
         conn.commit()
         conn.close()
 
+        # Delete ACL principals tied to this email
+        acl_deleted = delete_acl_entries_for_email(normalized_email)
+        if acl_deleted > 0:
+            result["deleted_from_tables"].append("app_access_entries")
+            result["deletion_counts"]["app_access_entries"] = acl_deleted
+            total_deleted += acl_deleted
+            logger.info(
+                f"Deleted {acl_deleted} ACL records from app_access_entries for {normalized_email}"
+            )
+
         # Delete from Teable (persistent data)
         try:
             from models.user import delete_user
 
-            user = get_user_by_email(user_email)
+            user = get_user_by_email(normalized_email)
             if user:
                 delete_user(user['id'])
                 result["deleted_from_tables"].append("users")
                 result["deletion_counts"]["users"] = 1
                 total_deleted += 1
-                logger.info(f"Deleted user from Teable for {user_email}")
+                logger.info(f"Deleted user from Teable for {normalized_email}")
         except Exception as e:
             error_msg = f"Error deleting from Teable users: {str(e)}"
             result["errors"].append(error_msg)
@@ -222,16 +240,16 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
         result["success"] = total_deleted > 0 or len(result["errors"]) == 0
 
         if result["success"]:
-            logger.info(f"Successfully deleted all data for user {user_email}")
+            logger.info(f"Successfully deleted all data for user {normalized_email}")
         else:
             logger.warning(
-                f"Data deletion completed with errors for {user_email}: {result['errors']}"
+                f"Data deletion completed with errors for {normalized_email}: {result['errors']}"
             )
 
     except Exception as e:
         error_msg = f"Critical error during data deletion: {str(e)}"
         result["errors"].append(error_msg)
-        logger.error(f"Critical data deletion error for {user_email}: {e}")
+        logger.error(f"Critical data deletion error for {normalized_email}: {e}")
 
     return result
 
@@ -241,6 +259,8 @@ def verify_user_deletion(user_email: str) -> Dict[str, Any]:
     Verify that user data has been completely deleted.
     Returns verification results.
     """
+    normalized_email = normalize_email(user_email)
+
     verification = {
         "completely_deleted": True,
         "remaining_data": {},
@@ -258,7 +278,7 @@ def verify_user_deletion(user_email: str) -> Dict[str, Any]:
         try:
             count = conn.execute(
                 f"SELECT COUNT(*) as count FROM {table_name} WHERE {column_name} = ?",
-                (user_email,),
+                (normalized_email,),
             ).fetchone()["count"]
 
             verification["tables_checked"].append(table_name)
@@ -274,7 +294,7 @@ def verify_user_deletion(user_email: str) -> Dict[str, Any]:
 
     # Check Teable (persistent data)
     try:
-        user = get_user_by_email(user_email)
+        user = get_user_by_email(normalized_email)
         verification["tables_checked"].append("users")
 
         if user:
@@ -283,6 +303,16 @@ def verify_user_deletion(user_email: str) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error(f"Error checking Teable users during verification: {e}")
+
+    # Check ACL table (Teable)
+    try:
+        acl_count = count_acl_entries_for_email(normalized_email)
+        verification["tables_checked"].append("app_access_entries")
+        if acl_count > 0:
+            verification["completely_deleted"] = False
+            verification["remaining_data"]["app_access_entries"] = acl_count
+    except Exception as e:
+        logger.error(f"Error checking app_access_entries during verification: {e}")
 
     return verification
 
@@ -320,3 +350,4 @@ def get_deletion_preview(user_email: str) -> Dict[str, Any]:
         preview["items_to_delete"].append("Discord verification status and roles")
 
     return preview
+    normalized_email = normalize_email(user_email)

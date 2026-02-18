@@ -9,6 +9,7 @@ Ephemeral tables created here:
 - opt_out_tokens: Privacy deletion tokens (permanent links but not user data)
 - oauth_tokens: OAuth session tokens (temporary)
 - api_key_logs: API usage logs (ephemeral, can be purged)
+- group_membership_cache: Short-lived ACL group membership cache
 """
 
 import sqlite3
@@ -163,6 +164,22 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expires ON oauth_tokens(expires_at)"
     )
     print("  ✓ oauth_tokens table (legacy)")
+
+    # Group membership cache table for ACL evaluation (EPHEMERAL)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_membership_cache (
+            group_key TEXT PRIMARY KEY,
+            members_json TEXT NOT NULL,
+            computed_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+    """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_cache_expires ON group_membership_cache(expires_at)"
+    )
+    print("  ✓ group_membership_cache table")
 
     try:
         conn.commit()

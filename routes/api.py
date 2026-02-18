@@ -10,7 +10,6 @@ from utils.validation import validate_api_request
 from utils.error_handling import handle_api_error, handle_validation_error
 from utils.rate_limiter import rate_limit_api_key
 from models.api_key import get_key_permissions, log_api_key_usage
-from models.oauth_token import verify_oauth_token
 from models.user import (
     get_user_by_email,
     get_user_by_discord_id,
@@ -284,46 +283,18 @@ def oauth2_user_info():
 
 # Legacy OAuth user info endpoint (for backward compatibility)
 @api_bp.route("/api/oauth/user-info", methods=["POST"])
-@require_api_key(["oauth"])
-@rate_limit_api_key
 def oauth_user_info_legacy():
-    """LEGACY: Get user information using OAuth temporary token."""
-    try:
-        data = request.get_json()
-        if not data or "token" not in data:
-            return jsonify({"success": False, "error": "Token is required"}), 400
-
-        token = data["token"]
-
-        # Verify the OAuth token and get user email
-        user_email = verify_oauth_token(token)
-        if not user_email:
-            return jsonify({"success": False, "error": "Invalid or expired token"}), 401
-
-        # Get user information
-        user = get_user_by_email(user_email)
-        if not user:
-            return jsonify({"success": False, "error": "User not found"}), 404
-
-        # Return user information (only safe, public fields)
-        user_info = {
-            "success": True,
-            "user": {
-                "email": user["email"],
-                "legal_name": user.get("legal_name"),
-                "preferred_name": user.get("preferred_name"),
-                "pronouns": user.get("pronouns"),
-                "dob": user.get("dob"),
-                "is_admin": is_admin(user["email"]),
-            },
-        }
-
-        return jsonify(user_info), 200
-
-    except Exception as e:
-        if DEBUG_MODE:
-            print(f"Error in oauth_user_info_legacy: {e}")
-        return jsonify({"success": False, "error": "Internal server error"}), 500
+    """LEGACY endpoint removed in favor of OAuth 2.0 authorization code flow."""
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error": "gone",
+                "message": "Legacy OAuth token exchange is deprecated. Use /oauth/authorize + /oauth/token + GET /api/oauth/user-info.",
+            }
+        ),
+        410,
+    )
 
 
 # Test endpoint (requires API key)

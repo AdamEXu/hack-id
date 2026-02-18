@@ -8,8 +8,28 @@ from utils.teable import (
     create_record,
     get_records,
     update_record,
-    find_record_by_field
+    find_record_by_field,
+    get_table_field_names,
+    create_table_field,
 )
+
+OPTIONAL_APP_FIELDS = {
+    "skip_consent_screen": {
+        "name": "skip_consent_screen",
+        "type": "checkbox",
+        "options": {},
+    },
+    "app_type": {
+        "name": "app_type",
+        "type": "singleSelect",
+        "options": {
+            "choices": [
+                {"name": "oauth", "color": "blue"},
+                {"name": "saml", "color": "green"},
+            ]
+        },
+    },
+}
 
 
 def generate_client_credentials() -> tuple[str, str]:
@@ -81,6 +101,8 @@ def get_all_apps() -> List[Dict[str, Any]]:
             "id": record['id'],
             **record['fields']
         }
+        app_dict.setdefault("skip_consent_screen", False)
+        app_dict.setdefault("app_type", "oauth")
         apps.append(app_dict)
 
     # Sort by most recent first
@@ -97,6 +119,20 @@ def get_app_by_id(app_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _ensure_optional_app_fields() -> set[str]:
+    """
+    Ensure optional fields needed by the modern apps UI exist.
+    Returns current field names after best-effort provisioning.
+    """
+    field_names = get_table_field_names("apps")
+    for field_name, field_config in OPTIONAL_APP_FIELDS.items():
+        if field_name in field_names:
+            continue
+        create_table_field("apps", field_config)
+
+    return get_table_field_names("apps")
+
+
 def create_app(
     name: str,
     redirect_uris: List[str],
@@ -104,7 +140,8 @@ def create_app(
     icon: Optional[str] = None,
     allowed_scopes: Optional[List[str]] = None,
     allow_anyone: bool = False,
-    skip_consent_screen: bool = False
+    skip_consent_screen: bool = False,
+    app_type: str = "oauth",
 ) -> Dict[str, Any]:
     """Create a new OAuth 2.0 app with client credentials."""
     if not redirect_uris or len(redirect_uris) == 0:
@@ -121,6 +158,8 @@ def create_app(
         allowed_scopes = ["profile", "email"]
 
     try:
+        apps_field_names = _ensure_optional_app_fields()
+
         record_data = {
             "name": name,
             "icon": icon or "",
@@ -130,9 +169,24 @@ def create_app(
             "allowed_scopes": json.dumps(allowed_scopes),
             "created_by": created_by,
             "allow_anyone": allow_anyone,
-            "skip_consent_screen": skip_consent_screen,
             "is_active": True
         }
+
+        if "skip_consent_screen" in apps_field_names:
+            record_data["skip_consent_screen"] = skip_consent_screen
+        elif skip_consent_screen:
+            return {
+                "success": False,
+                "error": "Apps table is missing skip_consent_screen. Please run migration/bootstrap.",
+            }
+
+        if "app_type" in apps_field_names:
+            record_data["app_type"] = app_type
+        elif app_type and app_type != "oauth":
+            return {
+                "success": False,
+                "error": "Apps table is missing app_type. Please run migration/bootstrap.",
+            }
 
         result = create_record('apps', record_data)
         if result and 'records' in result and len(result['records']) > 0:
@@ -154,7 +208,8 @@ def update_app(
     redirect_uris: Optional[List[str]] = None,
     allowed_scopes: Optional[List[str]] = None,
     allow_anyone: Optional[bool] = None,
-    skip_consent_screen: Optional[bool] = None
+    skip_consent_screen: Optional[bool] = None,
+    app_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update an existing OAuth 2.0 app."""
     # Build update data
@@ -183,10 +238,32 @@ def update_app(
     if skip_consent_screen is not None:
         update_data["skip_consent_screen"] = skip_consent_screen
 
+    if app_type is not None:
+        update_data["app_type"] = app_type
+
     if not update_data:
         return {"success": False, "error": "No fields to update"}
 
     try:
+        apps_field_names = _ensure_optional_app_fields()
+
+        if "skip_consent_screen" not in apps_field_names and "skip_consent_screen" in update_data:
+            return {
+                "success": False,
+                "error": "Apps table is missing skip_consent_screen. Please run migration/bootstrap.",
+            }
+
+        if "app_type" not in apps_field_names and "app_type" in update_data:
+            return {
+                "success": False,
+                "error": "Apps table is missing app_type. Please run migration/bootstrap.",
+            }
+
+        if "skip_consent_screen" not in apps_field_names:
+            update_data.pop("skip_consent_screen", None)
+        if "app_type" not in apps_field_names:
+            update_data.pop("app_type", None)
+
         update_record('apps', app_id, update_data)
         return {"success": True}
     except Exception as e:
@@ -230,6 +307,8 @@ def reactivate_app(app_id: str) -> Dict[str, Any]:
 
 def has_app_permission(admin_email: str, app_id: str, access_level: str = "read") -> bool:
     """
+    LEGACY helper.
+
     Check if admin has permission to access an app.
     access_level can be 'read' or 'write'.
     """

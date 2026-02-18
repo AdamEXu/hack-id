@@ -9,7 +9,6 @@ from flask import (
     url_for,
     jsonify,
 )
-from flask import current_app
 from services.auth_service import (
     send_email_verification,
     verify_email_code,
@@ -21,17 +20,16 @@ from services.auth_service import (
     unlink_discord_account,
 )
 from models.user import get_user_by_email, create_user, update_user
-from models.oauth_token import create_oauth_token
-from models.app import validate_app_redirect, has_app_permission, get_app_by_client_id, validate_redirect_uri
+from models.app import get_app_by_client_id, validate_redirect_uri
 from models.oauth import (
     create_authorization_code,
     exchange_code_for_token,
-    verify_access_token,
     revoke_access_token
 )
-from models.admin import is_admin
+from services.app_access_service import evaluate_app_acl_with_fail_open
+from services.universal_admin_snapshot import write_universal_admin_snapshot
 from config import DEBUG_MODE
-from urllib.parse import unquote
+from utils.validation import normalize_email
 import json
 
 auth_bp = Blueprint("auth", __name__)
@@ -92,13 +90,16 @@ def auth_google_callback():
     if not result["success"]:
         return render_template("auth.html", state="error", error=result["error"])
 
+    normalized_email = normalize_email(result["user"]["email"])
+
     # Store user info in session
     session.permanent = True
-    session["user_email"] = result["user"]["email"]
+    session["user_email"] = normalized_email
     session["user_name"] = result["user"]["name"]
+    write_universal_admin_snapshot(normalized_email, session)
 
     # Check if user needs to complete registration
-    user = get_user_by_email(result["user"]["email"])
+    user = get_user_by_email(normalized_email)
     if not user or not user.get("legal_name"):
         # User needs to complete registration
         # Keep verification_token in session if it exists for after registration
@@ -113,52 +114,6 @@ def auth_google_callback():
         # Redirect back to /oauth/authorize to continue the flow
         # The OAuth parameters are already in the session
         return redirect("/oauth/authorize")
-
-    # Check if this is part of legacy OAuth token flow
-    if "oauth_redirect" in session and "oauth_app_id" in session:
-        user_email = result["user"]["email"]
-        app_id = session.get("oauth_app_id")
-        redirect_url = session.get("oauth_redirect")
-
-        # Get app info to check permissions
-        from models.app import get_app_by_id
-        app = get_app_by_id(app_id)
-
-        if not app or not app['is_active']:
-            session.pop("oauth_redirect", None)
-            session.pop("oauth_app_id", None)
-            return render_template(
-                "auth.html",
-                state="error",
-                error="This app is no longer available."
-            )
-
-        # Check if app allows anyone or if user has permission
-        if not app['allow_anyone']:
-            if not is_admin(user_email):
-                session.pop("oauth_redirect", None)
-                session.pop("oauth_app_id", None)
-                return render_template(
-                    "auth.html",
-                    state="error",
-                    error="You don't have permission to access this app."
-                )
-
-            if not has_app_permission(user_email, app_id, 'read'):
-                session.pop("oauth_redirect", None)
-                session.pop("oauth_app_id", None)
-                return render_template(
-                    "auth.html",
-                    state="error",
-                    error="You don't have permission to access this app."
-                )
-
-        # Generate OAuth token and redirect to external app
-        token = create_oauth_token(user_email, expires_in_seconds=120)
-        session.pop("oauth_redirect", None)
-        session.pop("oauth_app_id", None)
-        separator = "&" if "?" in redirect_url else "?"
-        return redirect(f"{redirect_url}{separator}token={token}")
 
     return redirect("/")
 
@@ -249,19 +204,18 @@ def oauth_authorize():
     if "user_email" in session:
         user = get_user_by_email(session["user_email"])
         if user and user.get("legal_name"):  # User has completed registration
-            # Check if app allows anyone or if user has permission
-            if not app.get('allow_anyone'):
-                user_email = session["user_email"]
-
-                # Restricted apps require: admin + explicit app permission
-                if not is_admin(user_email) or not has_app_permission(
-                    user_email, app["id"], "read"
-                ):
-                    return render_template(
-                        "auth.html",
-                        state="error",
-                        error="You don't have permission to access this app."
-                    )
+            access_result = evaluate_app_acl_with_fail_open(
+                app=app,
+                user_email=session["user_email"],
+                path=request.path,
+                sess=session,
+            )
+            if not access_result["allowed"]:
+                return render_template(
+                    "auth.html",
+                    state="error",
+                    error="You don't have permission to access this app.",
+                )
 
             # Check if consent screen should be skipped
             if app.get('skip_consent_screen'):
@@ -333,23 +287,24 @@ def oauth_authorize_consent():
         separator = "&" if "?" in redirect_uri else "?"
         return redirect(f"{redirect_uri}{separator}error=invalid_client&state={state}")
 
-    # For restricted apps, re-validate permissions before issuing code
-    if not app.get('allow_anyone'):
-        user_email = session["user_email"]
+    access_result = evaluate_app_acl_with_fail_open(
+        app=app,
+        user_email=session["user_email"],
+        path=request.path,
+        sess=session,
+    )
+    if not access_result["allowed"]:
+        # Clear OAuth session
+        session.pop("oauth2_client_id", None)
+        session.pop("oauth2_redirect_uri", None)
+        session.pop("oauth2_scope", None)
+        session.pop("oauth2_state", None)
 
-        # Restricted apps require: admin + explicit app permission
-        if not is_admin(user_email) or not has_app_permission(
-            user_email, app["id"], "read"
-        ):
-            # Clear OAuth session
-            session.pop("oauth2_client_id", None)
-            session.pop("oauth2_redirect_uri", None)
-            session.pop("oauth2_scope", None)
-            session.pop("oauth2_state", None)
-
-            # Redirect with error
-            separator = "&" if "?" in redirect_uri else "?"
-            return redirect(f"{redirect_uri}{separator}error=access_denied&error_description=insufficient_permissions&state={state}")
+        # Redirect with error
+        separator = "&" if "?" in redirect_uri else "?"
+        return redirect(
+            f"{redirect_uri}{separator}error=access_denied&error_description=insufficient_permissions&state={state}"
+        )
 
     # Check if user approved
     if request.form.get("action") != "approve":
@@ -460,77 +415,15 @@ def oauth_revoke():
 
 @auth_bp.route("/oauth")
 def oauth_legacy():
-    """
-    LEGACY OAuth endpoint for backward compatibility.
-    Redirects to new OAuth 2.0 flow or handles old token-based flow.
-    """
-    redirect_url = request.args.get("redirect")
-
-    if not redirect_url:
-        return render_template(
-            "auth.html", state="error", error="Missing redirect parameter"
-        )
-
-    # Decode the redirect URL if it's URL encoded
-    redirect_url = unquote(redirect_url)
-
-    # Validate redirect URL against registered apps
-    app = validate_app_redirect(redirect_url)
-
-    if not app:
-        return render_template(
+    """Legacy OAuth endpoint is deprecated and removed."""
+    return (
+        render_template(
             "auth.html",
             state="error",
-            error="Invalid redirect URL. This app is not registered with Hack ID."
-        )
-
-    if not app['is_active']:
-        return render_template(
-            "auth.html",
-            state="error",
-            error="This app is currently disabled."
-        )
-
-    # Store app info and redirect URL in session for after login
-    session["oauth_app_id"] = app['id']
-    session["oauth_redirect"] = redirect_url
-
-    # If user is already logged in, check permissions and redirect
-    if "user_email" in session:
-        user = get_user_by_email(session["user_email"])
-        if user and user.get("legal_name"):  # User has completed registration
-            user_email = session["user_email"]
-
-            # Check if app allows anyone or if user has permission
-            if not app['allow_anyone']:
-                # App is restricted - check if user is admin with permission
-                if not is_admin(user_email):
-                    return render_template(
-                        "auth.html",
-                        state="error",
-                        error="You don't have permission to access this app. Please contact an administrator."
-                    )
-
-                if not has_app_permission(user_email, app['id'], 'read'):
-                    return render_template(
-                        "auth.html",
-                        state="error",
-                        error="You don't have permission to access this app. Please contact an administrator."
-                    )
-
-            # Generate temporary OAuth token
-            token = create_oauth_token(user_email, expires_in_seconds=120)
-
-            # Clear the oauth data from session
-            session.pop("oauth_app_id", None)
-            session.pop("oauth_redirect", None)
-
-            # Redirect to the external application with token
-            separator = "&" if "?" in redirect_url else "?"
-            return redirect(f"{redirect_url}{separator}token={token}")
-
-    # User is not logged in or hasn't completed registration, show login screen
-    return render_template("auth.html", state="email_login")
+            error="Legacy OAuth endpoint has been removed. Use OAuth 2.0: /oauth/authorize and /oauth/token.",
+        ),
+        410,
+    )
 
 
 @auth_bp.route("/logout")
@@ -597,7 +490,7 @@ def email_callback():
             error=result.get("error", "Authentication failed"),
         )
 
-    email = result["email"]
+    email = normalize_email(result["email"])
     name = result.get("name", "")
 
     # Check if user exists
@@ -606,59 +499,13 @@ def email_callback():
         session.permanent = True
         session["user_email"] = email
         session["user_name"] = user.get("preferred_name") or user.get("legal_name") or name
+        write_universal_admin_snapshot(email, session)
 
         # Check if this is part of OAuth 2.0 authorization code flow
         if "oauth2_client_id" in session and user.get("legal_name"):
             # Redirect back to /oauth/authorize to continue the flow
             # The OAuth parameters are already in the session
             return redirect("/oauth/authorize")
-
-        # Check if this is part of legacy OAuth token flow
-        if "oauth_redirect" in session and "oauth_app_id" in session and user.get("legal_name"):
-            user_email = session["user_email"]
-            app_id = session.get("oauth_app_id")
-            redirect_url = session.get("oauth_redirect")
-
-            # Get app info to check permissions
-            from models.app import get_app_by_id
-            app = get_app_by_id(app_id)
-
-            if not app or not app['is_active']:
-                session.pop("oauth_redirect", None)
-                session.pop("oauth_app_id", None)
-                return render_template(
-                    "auth.html",
-                    state="error",
-                    error="This app is no longer available."
-                )
-
-            # Check if app allows anyone or if user has permission
-            if not app['allow_anyone']:
-                if not is_admin(user_email):
-                    session.pop("oauth_redirect", None)
-                    session.pop("oauth_app_id", None)
-                    return render_template(
-                        "auth.html",
-                        state="error",
-                        error="You don't have permission to access this app."
-                    )
-
-                if not has_app_permission(user_email, app_id, 'read'):
-                    session.pop("oauth_redirect", None)
-                    session.pop("oauth_app_id", None)
-                    return render_template(
-                        "auth.html",
-                        state="error",
-                        error="You don't have permission to access this app."
-                    )
-
-            # Generate OAuth token and redirect to external app
-            token = create_oauth_token(user_email, expires_in_seconds=120)
-            session.pop("oauth_redirect", None)
-            session.pop("oauth_app_id", None)
-            separator = "&" if "?" in redirect_url else "?"
-            final_redirect = f"{redirect_url}{separator}token={token}"
-            return redirect(final_redirect)
 
         return redirect("/")
     else:
@@ -667,6 +514,7 @@ def email_callback():
         session["user_email"] = email
         session["user_name"] = name
         session["pending_registration"] = True
+        write_universal_admin_snapshot(email, session)
         return redirect("/register")
 
 
@@ -862,57 +710,6 @@ def register():
         # Redirect back to /oauth/authorize to continue the flow
         # This will handle skip_consent_screen and all permission checks
         return redirect("/oauth/authorize")
-
-    # Check if this is part of LEGACY OAuth flow (token-based)
-    if "oauth_redirect" in session and "oauth_app_id" in session:
-        user_email = session["user_email"]
-        app_id = session.get("oauth_app_id")
-        redirect_url = session.get("oauth_redirect")
-
-        # Get app info to check permissions
-        from models.app import get_app_by_id
-
-        app = get_app_by_id(app_id)
-
-        if not app or not app["is_active"]:
-            session.pop("oauth_redirect", None)
-            session.pop("oauth_app_id", None)
-            return render_template(
-                "auth.html",
-                state="error",
-                error="This app is no longer available."
-            )
-
-        # Check if app allows anyone or if user has permission
-        if not app["allow_anyone"]:
-            if not is_admin(user_email):
-                session.pop("oauth_redirect", None)
-                session.pop("oauth_app_id", None)
-                return render_template(
-                    "auth.html",
-                    state="error",
-                    error="You don't have permission to access this app."
-                )
-
-            if not has_app_permission(user_email, app_id, "read"):
-                session.pop("oauth_redirect", None)
-                session.pop("oauth_app_id", None)
-                return render_template(
-                    "auth.html",
-                    state="error",
-                    error="You don't have permission to access this app."
-                )
-
-        # Generate OAuth token and redirect to external app
-        token = create_oauth_token(user_email, expires_in_seconds=120)
-        session.pop("oauth_redirect", None)
-        session.pop("oauth_app_id", None)
-        separator = "&" if "?" in redirect_url else "?"
-        return redirect(f"{redirect_url}{separator}token={token}")
-
-    # If we had an incomplete OAuth session (redirect without app id), clear it
-    if "oauth_redirect" in session and "oauth_app_id" not in session:
-        session.pop("oauth_redirect", None)
 
     return redirect("/")
 

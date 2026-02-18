@@ -72,13 +72,6 @@
             "category": "Analytics",
             "endpoints": [],
             "risk_level": "low"
-        },
-        "oauth": {
-            "name": "OAuth Integration",
-            "description": "Allow OAuth flow integration and user info retrieval",
-            "category": "OAuth",
-            "endpoints": ["/api/oauth/user-info"],
-            "risk_level": "medium"
         }
     },
     "categories": {
@@ -101,10 +94,6 @@
         "Analytics": {
             "description": "Permissions for analytics and reporting",
             "color": "#6f42c1"
-        },
-        "OAuth": {
-            "description": "Permissions for OAuth integration and user authentication",
-            "color": "#17a2b8"
         }
     },
     "risk_levels": {

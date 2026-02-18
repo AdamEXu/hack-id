@@ -2,7 +2,7 @@
 
 import os
 import requests
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -20,6 +20,8 @@ TEABLE_TABLE_IDS = {
     'admin_permissions': os.getenv('TEABLE_TABLE_ADMIN_PERMISSIONS'),
     'api_keys': os.getenv('TEABLE_TABLE_API_KEYS'),
     'apps': os.getenv('TEABLE_TABLE_APPS'),
+    'app_access_entries': os.getenv('TEABLE_TABLE_APP_ACCESS_ENTRIES'),
+    'app_access_audit': os.getenv('TEABLE_TABLE_APP_ACCESS_AUDIT'),
 }
 
 
@@ -157,6 +159,36 @@ def get_records(table_name: str, limit: int = 100, offset: int = 0) -> List[Dict
         return []
 
 
+def get_records_strict(table_name: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    """
+    Get records from a Teable table and raise on failure.
+
+    This is intended for security-sensitive read paths that must distinguish
+    empty result sets from transport/API failures.
+    """
+    table_id = TEABLE_TABLE_IDS.get(table_name)
+    if not table_id:
+        raise ValueError(f"Unknown table: {table_name}")
+
+    url = f"{TEABLE_API_URL}/table/{table_id}/record"
+    params = {
+        'take': limit,
+        'skip': offset
+    }
+
+    try:
+        response = requests.get(url, headers=get_headers(), params=params, timeout=10)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Failed to get records from {table_name}: {exc}") from exc
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Failed to get records from {table_name}: status={response.status_code} body={response.text}"
+        )
+
+    return response.json().get('records', [])
+
+
 def count_records(table_name: str) -> int:
     """
     Count total number of records in a Teable table.
@@ -288,6 +320,21 @@ def delete_record(table_name: str, record_id: str) -> bool:
     return response.status_code == 200
 
 
+def delete_records_batch(table_name: str, record_ids: List[str]) -> bool:
+    """Delete multiple records in one call."""
+    if not record_ids:
+        return True
+
+    table_id = TEABLE_TABLE_IDS.get(table_name)
+    if not table_id:
+        raise ValueError(f"Unknown table: {table_name}")
+
+    url = f"{TEABLE_API_URL}/table/{table_id}/record"
+    params = {'recordIds': ','.join(record_ids)}
+    response = requests.delete(url, headers=get_headers(), params=params)
+    return response.status_code == 200
+
+
 def find_record_by_field(table_name: str, field_name: str, value: Any) -> Optional[Dict[str, Any]]:
     """
     Find a record by a specific field value.
@@ -308,3 +355,56 @@ def find_record_by_field(table_name: str, field_name: str, value: Any) -> Option
             return record
 
     return None
+
+
+def get_table_fields(table_name: str) -> List[Dict[str, Any]]:
+    """Get field definitions for a Teable table."""
+    table_id = TEABLE_TABLE_IDS.get(table_name)
+    if not table_id:
+        raise ValueError(f"Unknown table: {table_name}")
+
+    url = f"{TEABLE_API_URL}/table/{table_id}/field"
+    response = requests.get(url, headers=get_headers(), timeout=10)
+    if response.status_code != 200:
+        print(f"❌ Failed to get fields from {table_name}")
+        print(f"   Status: {response.status_code}")
+        print(f"   Response: {response.text}")
+        return []
+
+    data = response.json()
+    if isinstance(data, list):
+        return data
+    return data.get("fields", [])
+
+
+def get_table_field_names(table_name: str) -> Set[str]:
+    """Get existing field names for a Teable table."""
+    fields = get_table_fields(table_name)
+    return {
+        field.get("name")
+        for field in fields
+        if isinstance(field, dict) and field.get("name")
+    }
+
+
+def create_table_field(table_name: str, field_config: Dict[str, Any]) -> bool:
+    """Create a field in a Teable table (idempotent-friendly)."""
+    table_id = TEABLE_TABLE_IDS.get(table_name)
+    if not table_id:
+        raise ValueError(f"Unknown table: {table_name}")
+
+    url = f"{TEABLE_API_URL}/table/{table_id}/field"
+    response = requests.post(url, headers=get_headers(), json=field_config, timeout=10)
+    if response.status_code in [200, 201]:
+        return True
+
+    # Existing field responses vary by Teable version; treat common duplicates as success.
+    if response.status_code in [400, 409]:
+        body = (response.text or "").lower()
+        if "exist" in body or "duplicate" in body or "already" in body:
+            return True
+
+    print(f"❌ Failed to create field in {table_name}")
+    print(f"   Status: {response.status_code}")
+    print(f"   Response: {response.text}")
+    return False

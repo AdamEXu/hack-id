@@ -1,6 +1,7 @@
 """Admin models and database operations using Teable."""
 
 from typing import Dict, List, Any, Optional
+from utils.validation import normalize_email
 from utils.teable import (
     create_record,
     get_records,
@@ -13,7 +14,18 @@ from utils.teable import (
 
 def is_admin(email: str) -> bool:
     """Check if user is an admin."""
-    record = find_record_by_field('admins', 'email', email)
+    normalized_email = normalize_email(email)
+    record = find_record_by_field('admins', 'email', normalized_email)
+
+    if not record:
+        # Backward-compatible fallback for legacy mixed-case rows.
+        all_admin_rows = get_records('admins', limit=1000)
+        for admin_row in all_admin_rows:
+            candidate_email = admin_row.get('fields', {}).get('email', '')
+            if normalize_email(candidate_email) == normalized_email:
+                record = admin_row
+                break
+
     if record:
         return record['fields'].get('is_active', False)
     return False
@@ -38,6 +50,9 @@ def get_all_admins() -> List[Dict[str, Any]]:
 
 def add_admin(email: str, added_by: str) -> Dict[str, Any]:
     """Add a new admin user."""
+    email = normalize_email(email)
+    added_by = normalize_email(added_by)
+
     # Check if already exists
     existing = find_record_by_field('admins', 'email', email)
     if existing:
@@ -60,6 +75,9 @@ def add_admin(email: str, added_by: str) -> Dict[str, Any]:
 
 def remove_admin(email: str, removed_by: str) -> Dict[str, Any]:
     """Remove admin privileges (deactivate)."""
+    email = normalize_email(email)
+    removed_by = normalize_email(removed_by)
+
     # Get all admins sorted by creation (first one is system admin)
     all_admins = get_all_admins()
     if not all_admins:
@@ -90,6 +108,9 @@ def remove_admin(email: str, removed_by: str) -> Dict[str, Any]:
 
 def reactivate_admin(email: str, reactivated_by: str) -> Dict[str, Any]:
     """Reactivate an admin user."""
+    email = normalize_email(email)
+    reactivated_by = normalize_email(reactivated_by)
+
     admin_record = find_record_by_field('admins', 'email', email)
     if not admin_record:
         return {"success": False, "error": "Admin not found"}
@@ -113,6 +134,7 @@ def get_admin_stats() -> Dict[str, Any]:
 
 def is_system_admin(email: str) -> bool:
     """Check if user is the first system administrator."""
+    email = normalize_email(email)
     all_admins = get_all_admins()
     if not all_admins:
         return False
@@ -121,16 +143,17 @@ def is_system_admin(email: str) -> bool:
     all_admins.sort(key=lambda x: x.get('id', ''))
     first_admin = all_admins[0] if all_admins else None
 
-    return first_admin and email == first_admin.get('email')
+    return first_admin and email == normalize_email(first_admin.get('email', ''))
 
 
 def get_admin_permissions(email: str) -> List[Dict[str, Any]]:
     """Get all permissions for an admin."""
+    email = normalize_email(email)
     all_permissions = get_records('admin_permissions', limit=1000)
 
     admin_permissions = []
     for perm in all_permissions:
-        if perm['fields'].get('admin_email') == email:
+        if normalize_email(perm['fields'].get('admin_email', '')) == email:
             perm_dict = {
                 "id": perm['id'],
                 **perm['fields']
@@ -166,7 +189,7 @@ def grant_permission(
     all_permissions = get_records('admin_permissions', limit=1000)
     for perm in all_permissions:
         fields = perm['fields']
-        if (fields.get('admin_email') == admin_email and
+        if (normalize_email(fields.get('admin_email', '')) == admin_email and
             fields.get('permission_type') == permission_type and
             fields.get('permission_value') == permission_value and
             fields.get('access_level') == access_level):
@@ -194,12 +217,13 @@ def revoke_permission(
     access_level: str
 ) -> Dict[str, Any]:
     """Revoke a specific permission from an admin."""
+    admin_email = normalize_email(admin_email)
     all_permissions = get_records('admin_permissions', limit=1000)
 
     try:
         for perm in all_permissions:
             fields = perm['fields']
-            if (fields.get('admin_email') == admin_email and
+            if (normalize_email(fields.get('admin_email', '')) == admin_email and
                 fields.get('permission_type') == permission_type and
                 fields.get('permission_value') == permission_value and
                 fields.get('access_level') == access_level):
@@ -273,3 +297,25 @@ def has_page_permission(admin_email: str, page_name: str, access_level: str = "r
             return True
 
     return False
+
+
+def has_universal_write_permission(admin_email: str) -> bool:
+    """Return True when admin has universal */* write permission."""
+    admin_email = normalize_email(admin_email)
+    if is_system_admin(admin_email):
+        return True
+
+    all_permissions = get_admin_permissions(admin_email)
+    for perm in all_permissions:
+        if (
+            perm.get("permission_type") == "*"
+            and perm.get("permission_value") == "*"
+            and perm.get("access_level") == "write"
+        ):
+            return True
+    return False
+    admin_email = normalize_email(admin_email)
+    granted_by = normalize_email(granted_by)
+
+    admin_email = normalize_email(admin_email)
+    admin_email = normalize_email(admin_email)

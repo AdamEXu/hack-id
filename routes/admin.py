@@ -1,6 +1,4 @@
 """Admin routes for user and API key management."""
-
-import json
 from flask import (
     Blueprint,
     render_template,
@@ -8,6 +6,7 @@ from flask import (
     request,
     session,
     jsonify,
+    make_response,
 )
 
 # CSRF exemption will be handled in app.py
@@ -25,11 +24,9 @@ from models.admin import (
     get_all_admins,
     add_admin,
     remove_admin,
-    get_admin_stats,
     get_admin_permissions,
     grant_permission,
     revoke_permission,
-    is_system_admin,
     has_page_permission,
 )
 from models.app import (
@@ -40,8 +37,21 @@ from models.app import (
     get_app_by_id,
     regenerate_client_secret,
 )
+from services.app_access_service import (
+    get_acl_entries_for_admin,
+    replace_app_acl_entries,
+    log_if_restricted_app_acl_empty,
+)
+from services.universal_admin_snapshot import write_universal_admin_snapshot
 
 admin_bp = Blueprint("admin", __name__)
+
+
+def refresh_universal_admin_snapshot():
+    """Refresh universal-write admin snapshot for fail-open eligibility."""
+    if "user_email" not in session:
+        return
+    write_universal_admin_snapshot(session["user_email"], session)
 
 
 def require_admin(f):
@@ -78,6 +88,15 @@ def get_admin_page_permissions():
     return permissions
 
 
+def get_admin_layout_context():
+    """Common template context for admin layout pages."""
+    return {
+        "admin_name": session.get("user_name", "Admin"),
+        "permissions": get_admin_page_permissions(),
+        "acl_fail_open_used": bool(session.get("acl_fail_open_used")),
+    }
+
+
 def require_page_permission(page_name, access_level="read"):
     """Decorator to require specific page permission."""
     def decorator(f):
@@ -95,7 +114,43 @@ def require_page_permission(page_name, access_level="read"):
                     "error": f"You don't have permission to access this page. Required: {page_name} ({access_level})"
                 }), 403
 
-            return f(*args, **kwargs)
+            result = f(*args, **kwargs)
+            response = make_response(result)
+            if access_level == "write" and response.status_code < 400:
+                refresh_universal_admin_snapshot()
+            return result
+
+        wrapper.__name__ = f.__name__
+        return wrapper
+    return decorator
+
+
+def require_page_permission_html(page_name, access_level="read"):
+    """Decorator to require page permission and render HTML 403 on denial."""
+    def decorator(f):
+        def wrapper(*args, **kwargs):
+            if "user_email" not in session:
+                return redirect("/")
+
+            if not is_admin(session["user_email"]):
+                return render_template(
+                    "admin_forbidden.html",
+                    required_page=page_name,
+                    required_access=access_level,
+                ), 403
+
+            if not has_page_permission(session["user_email"], page_name, access_level):
+                return render_template(
+                    "admin_forbidden.html",
+                    required_page=page_name,
+                    required_access=access_level,
+                ), 403
+
+            result = f(*args, **kwargs)
+            response = make_response(result)
+            if access_level == "write" and response.status_code < 400:
+                refresh_universal_admin_snapshot()
+            return result
 
         wrapper.__name__ = f.__name__
         return wrapper
@@ -112,16 +167,14 @@ def admin_redirect():
 @require_admin
 def admin_dashboard():
     """Admin dashboard - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/attendees")
 @require_admin
 def admin_attendees():
     """Admin attendees page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/users/data", methods=["GET"])
@@ -162,8 +215,7 @@ def get_users_data():
 @require_admin
 def admin_events():
     """Admin events page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/events/data", methods=["GET"])
@@ -212,8 +264,7 @@ def get_events_data():
 @require_admin
 def admin_keys():
     """Admin API keys page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/update-user", methods=["POST"])
@@ -383,8 +434,7 @@ def get_api_key_logs_route(key_id):
 @require_admin
 def admin_admins():
     """Admin admins page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 @admin_bp.route("/admin/admins/data", methods=["GET"])
 @require_page_permission("admins", "read")
@@ -529,12 +579,49 @@ def get_apps_route():
         return jsonify({"success": False, "error": str(e)})
 
 
+@admin_bp.route("/admin/apps/<app_id>/access", methods=["GET"])
+@require_page_permission("apps", "read")
+def get_app_access_route(app_id):
+    """Get ACL entries for a single app."""
+    try:
+        app = get_app_by_id(app_id)
+        if not app:
+            return jsonify({"success": False, "error": "App not found"}), 404
+
+        entries = get_acl_entries_for_admin(app_id)
+        return jsonify({"success": True, "entries": entries})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@admin_bp.route("/admin/apps/<app_id>/access", methods=["PUT"])
+@require_page_permission("apps", "write")
+def put_app_access_route(app_id):
+    """Replace ACL entries for a single app."""
+    try:
+        app = get_app_by_id(app_id)
+        if not app:
+            return jsonify({"success": False, "error": "App not found"}), 404
+
+        data = request.get_json() or {}
+        entries = data.get("entries", [])
+
+        result = replace_app_acl_entries(
+            app=app,
+            entries=entries,
+            actor_email=session["user_email"],
+        )
+        status = 200 if result.get("success") else 400
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @admin_bp.route("/admin/apps")
-@require_admin
+@require_page_permission_html("apps", "read")
 def admin_apps():
     """Admin apps page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 @admin_bp.route("/admin/apps", methods=["POST"])
 @require_page_permission("apps", "write")
@@ -548,6 +635,7 @@ def create_app_route():
         allowed_scopes = data.get("allowed_scopes", ["profile", "email"])
         allow_anyone = data.get("allow_anyone", False)
         skip_consent_screen = data.get("skip_consent_screen", False)
+        app_type = data.get("app_type", "oauth")
 
         if not name:
             return jsonify({"success": False, "error": "Name is required"})
@@ -562,8 +650,17 @@ def create_app_route():
             icon=icon,
             allowed_scopes=allowed_scopes,
             allow_anyone=allow_anyone,
-            skip_consent_screen=skip_consent_screen
+            skip_consent_screen=skip_consent_screen,
+            app_type=app_type,
         )
+        if result.get("success"):
+            created_app = get_app_by_id(result.get("app_id"))
+            if created_app:
+                log_if_restricted_app_acl_empty(
+                    app=created_app,
+                    actor_email=session["user_email"],
+                    path=request.path,
+                )
         return jsonify(result)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -582,8 +679,17 @@ def update_app_route(app_id):
             redirect_uris=data.get("redirect_uris"),
             allowed_scopes=data.get("allowed_scopes"),
             allow_anyone=data.get("allow_anyone"),
-            skip_consent_screen=data.get("skip_consent_screen")
+            skip_consent_screen=data.get("skip_consent_screen"),
+            app_type=data.get("app_type"),
         )
+        if result.get("success"):
+            updated_app = get_app_by_id(app_id)
+            if updated_app:
+                log_if_restricted_app_acl_empty(
+                    app=updated_app,
+                    actor_email=session["user_email"],
+                    path=request.path,
+                )
         return jsonify(result)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})

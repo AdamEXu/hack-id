@@ -10,6 +10,7 @@ from config import (
     SECRET_KEY,
     DEBUG_MODE,
     PROD,
+    APP_ACL_MAX_ENTRIES,
     print_debug_info,
     validate_config,
     POSTHOG_API_KEY,
@@ -267,6 +268,20 @@ def verify_teable_tables():
         print("  2. All table IDs are in your .env file")
         print("  3. Your TEABLE_ACCESS_TOKEN has access to these tables\n")
         exit(1)
+
+    try:
+        acl_count = count_records("app_access_entries")
+        if acl_count >= 900:
+            print(
+                f"⚠️  ACL table has {acl_count} rows. Pagination is deferred; "
+                "auth-path ACL reads currently assume <1000 rows."
+            )
+        if APP_ACL_MAX_ENTRIES >= 1000:
+            print(
+                "⚠️  APP_ACL_MAX_ENTRIES should remain below 1000 until paginated ACL reads are implemented."
+            )
+    except Exception as exc:
+        print(f"⚠️  Unable to check ACL table count: {exc}")
 
     print("✅ All Teable tables are accessible!\n")
 
