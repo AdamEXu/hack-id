@@ -167,7 +167,7 @@ python -m pytest -q
 Run the auth/OAuth interaction coverage gate at 100%:
 
 ```bash
-coverage run --include="tests/test_auth_routes.py,tests/test_oauth_routes.py" -m pytest -q tests/test_auth_routes.py tests/test_oauth_routes.py
+coverage run --source="routes,models" -m pytest -q tests/test_auth_routes.py tests/test_oauth_routes.py
 coverage report -m --fail-under=100
 ```
 
