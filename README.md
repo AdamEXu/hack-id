@@ -155,6 +155,24 @@ hack-id/
     └── permissions.json      # API permissions
 ```
 
+
+## ✅ Testing
+
+Run the full automated suite (unit + route + Playwright API interaction tests):
+
+```bash
+python -m pytest -q
+```
+
+Run the auth/OAuth interaction coverage gate at 100%:
+
+```bash
+coverage run --include="tests/test_auth_routes.py,tests/test_oauth_routes.py" -m pytest -q tests/test_auth_routes.py tests/test_oauth_routes.py
+coverage report -m --fail-under=100
+```
+
+> Note: Playwright is included for interaction tests via API request contexts (no local browser binary required for these tests).
+
 ## 🔧 Configuration
 
 ### Environment Variables

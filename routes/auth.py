@@ -403,7 +403,11 @@ def oauth_token():
     client_secret = request.form.get("client_secret")
 
     if DEBUG_MODE:
-        print(f"OAuth token request: grant_type={grant_type}, code={code[:20]}..., client_id={client_id}, redirect_uri={redirect_uri}")
+        code_preview = (code[:20] + "...") if code else "None"
+        print(
+            f"OAuth token request: grant_type={grant_type}, code={code_preview}, "
+            f"client_id={client_id}, redirect_uri={redirect_uri}"
+        )
 
     # Validate grant_type
     if grant_type != "authorization_code":
