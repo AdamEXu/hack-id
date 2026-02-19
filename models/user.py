@@ -2,6 +2,7 @@
 
 import json
 from typing import Optional, Dict, List, Any
+from utils.validation import normalize_email
 from utils.teable import (
     create_record,
     get_records,
@@ -22,6 +23,8 @@ def create_user(
     events=None,
 ):
     """Create a new user."""
+    email = normalize_email(email)
+
     # Check if user already exists
     existing = find_record_by_field('users', 'email', email)
     if existing:
@@ -47,7 +50,17 @@ def create_user(
 
 def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
     """Get user by email address."""
-    record = find_record_by_field('users', 'email', email)
+    normalized_email = normalize_email(email)
+    record = find_record_by_field('users', 'email', normalized_email)
+
+    # Backward-compatible fallback for legacy mixed-case rows.
+    if not record:
+        all_records = get_records('users', limit=1000)
+        for candidate in all_records:
+            candidate_email = candidate.get('fields', {}).get('email', '')
+            if normalize_email(candidate_email) == normalized_email:
+                record = candidate
+                break
 
     if record:
         user_dict = {
@@ -109,6 +122,9 @@ def update_user(user_id: str, **kwargs):
     for field, value in kwargs.items():
         if field not in allowed_fields:
             raise ValueError(f"Invalid field name: {field}")
+
+        if field == "email" and isinstance(value, str):
+            value = normalize_email(value)
 
         if field == "events" and isinstance(value, list):
             value = json.dumps(value)

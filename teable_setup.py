@@ -3,10 +3,10 @@ Teable Database Setup Script
 Creates all necessary tables in Teable for HackID migration
 
 Run this script ONCE to set up your Teable database structure.
-It will create 5 tables (persistent data only) and output the table IDs you'll need.
+It will create 7 tables (persistent data only) and output the table IDs you'll need.
 
 Tables created in Teable:
-- users, admins, admin_permissions, api_keys, apps
+- users, admins, admin_permissions, api_keys, apps, app_access_entries, app_access_audit
 
 Tables remaining in SQLite (ephemeral/temporary):
 - email_codes, verification_tokens, opt_out_tokens, oauth_tokens, api_key_logs
@@ -281,6 +281,183 @@ TABLES = [
                 "name": "is_active",
                 "type": "checkbox",
                 "options": {}
+            },
+            {
+                "name": "app_type",
+                "type": "singleSelect",
+                "options": {
+                    "choices": [
+                        {"name": "oauth", "color": "blue"},
+                        {"name": "saml", "color": "green"}
+                    ]
+                }
+            },
+            {
+                "name": "saml_metadata_url",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_entity_id",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_acs_url",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_acs_binding",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_slo_url",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_nameid_format",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_attribute_mapping",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "saml_require_signed_authn_request",
+                "type": "checkbox",
+                "options": {}
+            },
+            {
+                "name": "saml_enabled",
+                "type": "checkbox",
+                "options": {}
+            },
+            {
+                "name": "saml_sp_signing_certs_json",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_etag",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_last_fetched_at",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_last_applied_at",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_pending_diff_json",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_sync_error",
+                "type": "longText",
+                "options": {}
+            }
+        ]
+    },
+    {
+        "name": "app_access_entries",
+        "description": "Application ACL principals",
+        "icon": "🛡️",
+        "fields": [
+            {
+                "name": "app_id",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "principal_type",
+                "type": "singleSelect",
+                "options": {
+                    "choices": [
+                        {"name": "email", "color": "blue"},
+                        {"name": "group_admins", "color": "green"},
+                        {"name": "group_event_attendees", "color": "orange"}
+                    ]
+                }
+            },
+            {
+                "name": "principal_ref",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "role",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "created_by",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "created_at",
+                "type": "date",
+                "options": {
+                    "formatting": {
+                        "date": "YYYY-MM-DD",
+                        "time": "HH:mm",
+                        "timeZone": "UTC"
+                    }
+                }
+            }
+        ]
+    },
+    {
+        "name": "app_access_audit",
+        "description": "Audit history for ACL changes",
+        "icon": "🧾",
+        "fields": [
+            {
+                "name": "app_id",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "actor_email",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "action",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "before_json",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "after_json",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "created_at",
+                "type": "date",
+                "options": {
+                    "formatting": {
+                        "date": "YYYY-MM-DD",
+                        "time": "HH:mm",
+                        "timeZone": "UTC"
+                    }
+                }
             }
         ]
     }

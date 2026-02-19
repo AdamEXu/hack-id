@@ -55,6 +55,35 @@
     font-style: italic;
 }
 
+.saml-app-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.saml-app-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border: 2px solid black;
+    border-radius: 4px;
+    padding: 10px 12px;
+    background: #f8f9fa;
+}
+
+.saml-app-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: "Nunito Sans", sans-serif;
+    font-size: 16px;
+    color: black;
+}
+
+.saml-app-icon {
+    font-size: 18px;
+}
+
 /* Discord section */
 .discord-info {
     display: flex;

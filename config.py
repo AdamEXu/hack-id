@@ -1,6 +1,7 @@
 """Configuration module for the Flask application."""
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Try to load .env file explicitly
@@ -17,10 +18,8 @@ PROD = os.getenv("PROD", "").upper() == "TRUE"
 DEBUG_MODE = not PROD
 
 # Base URL configuration
-if PROD:
-    BASE_URL = "https://id.hack.sv"
-else:
-    BASE_URL = "http://127.0.0.1:3000"
+_DEFAULT_BASE_URL = "https://id.hack.sv" if PROD else "http://127.0.0.1:3000"
+BASE_URL = (os.getenv("BASE_URL", _DEFAULT_BASE_URL) or _DEFAULT_BASE_URL).strip().rstrip("/")
 
 # Flask configuration
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -65,6 +64,9 @@ LISTMONK_ENABLED = os.getenv("LISTMONK_ENABLED", "true").lower() == "true" and L
 # Database configuration
 DATABASE = "users.db"
 
+# Server-side session storage (SQLite via Flask-Session + SQLAlchemy)
+SESSION_SQLALCHEMY_URI = f"sqlite:///{DATABASE}"
+
 # Teable configuration
 TEABLE_API_URL = os.getenv('TEABLE_API_URL', 'https://app.teable.ai/api')
 TEABLE_ACCESS_TOKEN = os.getenv('TEABLE_ACCESS_TOKEN')
@@ -74,6 +76,22 @@ TEABLE_TABLE_ADMINS = os.getenv('TEABLE_TABLE_ADMINS')
 TEABLE_TABLE_ADMIN_PERMISSIONS = os.getenv('TEABLE_TABLE_ADMIN_PERMISSIONS')
 TEABLE_TABLE_API_KEYS = os.getenv('TEABLE_TABLE_API_KEYS')
 TEABLE_TABLE_APPS = os.getenv('TEABLE_TABLE_APPS')
+TEABLE_TABLE_APP_ACCESS_ENTRIES = os.getenv('TEABLE_TABLE_APP_ACCESS_ENTRIES')
+TEABLE_TABLE_APP_ACCESS_AUDIT = os.getenv('TEABLE_TABLE_APP_ACCESS_AUDIT')
+APP_ACL_MAX_ENTRIES = int(os.getenv("APP_ACL_MAX_ENTRIES", "500"))
+
+# SAML IdP configuration
+SAML_ENABLED = os.getenv("SAML_ENABLED", "false").lower() == "true"
+SAML_IDP_ENTITY_ID = os.getenv("SAML_IDP_ENTITY_ID", f"{BASE_URL}/saml/metadata")
+SAML_IDP_KEY_ACTIVE_PATH = os.getenv("SAML_IDP_KEY_ACTIVE_PATH", "")
+SAML_IDP_CERT_ACTIVE_PATH = os.getenv("SAML_IDP_CERT_ACTIVE_PATH", "")
+SAML_IDP_KEY_NEXT_PATH = os.getenv("SAML_IDP_KEY_NEXT_PATH", "")
+SAML_IDP_CERT_NEXT_PATH = os.getenv("SAML_IDP_CERT_NEXT_PATH", "")
+SAML_XMLSEC_BINARY = os.getenv("SAML_XMLSEC_BINARY", "/usr/bin/xmlsec1")
+SAML_METADATA_SYNC_ENABLED = os.getenv("SAML_METADATA_SYNC_ENABLED", "true").lower() == "true"
+SAML_METADATA_SYNC_TIMEOUT_SEC = int(os.getenv("SAML_METADATA_SYNC_TIMEOUT_SEC", "10"))
+SAML_METADATA_SYNC_MAX_BYTES = int(os.getenv("SAML_METADATA_SYNC_MAX_BYTES", "262144"))
+SAML_METADATA_SYNC_USER_AGENT = os.getenv("SAML_METADATA_SYNC_USER_AGENT", "hack-id-saml-sync/1.0")
 
 
 def print_debug_info():
@@ -100,6 +118,20 @@ def print_debug_info():
         print(f"TEABLE_TABLE_ADMIN_PERMISSIONS: {'[SET]' if TEABLE_TABLE_ADMIN_PERMISSIONS else '[NOT SET]'}")
         print(f"TEABLE_TABLE_API_KEYS: {'[SET]' if TEABLE_TABLE_API_KEYS else '[NOT SET]'}")
         print(f"TEABLE_TABLE_APPS: {'[SET]' if TEABLE_TABLE_APPS else '[NOT SET]'}")
+        print(f"TEABLE_TABLE_APP_ACCESS_ENTRIES: {'[SET]' if TEABLE_TABLE_APP_ACCESS_ENTRIES else '[NOT SET]'}")
+        print(f"TEABLE_TABLE_APP_ACCESS_AUDIT: {'[SET]' if TEABLE_TABLE_APP_ACCESS_AUDIT else '[NOT SET]'}")
+        print(f"APP_ACL_MAX_ENTRIES: {APP_ACL_MAX_ENTRIES}")
+        print(f"SAML_ENABLED: {SAML_ENABLED}")
+        print(f"SAML_IDP_ENTITY_ID: {SAML_IDP_ENTITY_ID}")
+        print(f"SAML_IDP_KEY_ACTIVE_PATH: {'[SET]' if SAML_IDP_KEY_ACTIVE_PATH else '[NOT SET]'}")
+        print(f"SAML_IDP_CERT_ACTIVE_PATH: {'[SET]' if SAML_IDP_CERT_ACTIVE_PATH else '[NOT SET]'}")
+        print(f"SAML_IDP_KEY_NEXT_PATH: {'[SET]' if SAML_IDP_KEY_NEXT_PATH else '[NOT SET]'}")
+        print(f"SAML_IDP_CERT_NEXT_PATH: {'[SET]' if SAML_IDP_CERT_NEXT_PATH else '[NOT SET]'}")
+        print(f"SAML_XMLSEC_BINARY: {SAML_XMLSEC_BINARY}")
+        print(f"SAML_METADATA_SYNC_ENABLED: {SAML_METADATA_SYNC_ENABLED}")
+        print(f"SAML_METADATA_SYNC_TIMEOUT_SEC: {SAML_METADATA_SYNC_TIMEOUT_SEC}")
+        print(f"SAML_METADATA_SYNC_MAX_BYTES: {SAML_METADATA_SYNC_MAX_BYTES}")
+        print(f"SAML_METADATA_SYNC_USER_AGENT: {SAML_METADATA_SYNC_USER_AGENT}")
         print("===================================")
 
 
@@ -124,11 +156,30 @@ def validate_config():
         'TEABLE_TABLE_ADMIN_PERMISSIONS': TEABLE_TABLE_ADMIN_PERMISSIONS,
         'TEABLE_TABLE_API_KEYS': TEABLE_TABLE_API_KEYS,
         'TEABLE_TABLE_APPS': TEABLE_TABLE_APPS,
+        'TEABLE_TABLE_APP_ACCESS_ENTRIES': TEABLE_TABLE_APP_ACCESS_ENTRIES,
+        'TEABLE_TABLE_APP_ACCESS_AUDIT': TEABLE_TABLE_APP_ACCESS_AUDIT,
     }
 
     for table_var, table_id in teable_tables.items():
         if not table_id:
             errors.append(f"{table_var} not set")
+
+    if SAML_ENABLED:
+        if not SAML_IDP_ENTITY_ID:
+            errors.append("SAML_IDP_ENTITY_ID not set")
+        if not SAML_IDP_KEY_ACTIVE_PATH:
+            errors.append("SAML_IDP_KEY_ACTIVE_PATH not set")
+        if not SAML_IDP_CERT_ACTIVE_PATH:
+            errors.append("SAML_IDP_CERT_ACTIVE_PATH not set")
+        if not Path(SAML_XMLSEC_BINARY).exists():
+            errors.append(f"SAML_XMLSEC_BINARY does not exist: {SAML_XMLSEC_BINARY}")
+
+        for name, path in (
+            ("SAML_IDP_KEY_ACTIVE_PATH", SAML_IDP_KEY_ACTIVE_PATH),
+            ("SAML_IDP_CERT_ACTIVE_PATH", SAML_IDP_CERT_ACTIVE_PATH),
+        ):
+            if path and not Path(path).exists():
+                errors.append(f"{name} does not exist: {path}")
 
     if errors:
         print("\n" + "="*60)

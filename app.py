@@ -2,14 +2,19 @@
 
 import os
 import secrets
+from urllib.parse import urlparse
 from flask import Flask, request, jsonify, g
 from flask_wtf.csrf import CSRFProtect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_session import Session
+from flask_sqlalchemy import SQLAlchemy
 from config import (
     SECRET_KEY,
     DEBUG_MODE,
     PROD,
+    APP_ACL_MAX_ENTRIES,
+    SESSION_SQLALCHEMY_URI,
     print_debug_info,
     validate_config,
     POSTHOG_API_KEY,
@@ -21,6 +26,7 @@ from utils.database import get_db_connection
 from utils.rate_limiter import rate_limit_api_key, start_cleanup_thread
 from utils.censoring import register_censoring_filters
 from routes.auth import auth_bp, oauth_bp
+from routes.saml import saml_bp, saml_launch_bp
 from routes.admin import admin_bp
 # from routes.admin_database import admin_database_bp  # DEPRECATED: Database swap feature obsolete with Teable migration
 from routes.opt_out import opt_out_bp
@@ -36,10 +42,24 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,  # Prevent XSS access to cookies
     SESSION_COOKIE_SAMESITE="Lax",  # CSRF protection
     PERMANENT_SESSION_LIFETIME=3600,  # 1 hour session timeout
+    SESSION_TYPE="sqlalchemy",
+    SESSION_USE_SIGNER=True,
+    SESSION_PERMANENT=True,
+    SESSION_KEY_PREFIX="hackid:",
+    SESSION_SQLALCHEMY_TABLE="flask_sessions",
+    SQLALCHEMY_DATABASE_URI=SESSION_SQLALCHEMY_URI,
+    SQLALCHEMY_TRACK_MODIFICATIONS=False,
 )
 
 # Register censoring filters for templates
 register_censoring_filters(app)
+
+# Configure server-side session storage via SQLite.
+db = SQLAlchemy(app)
+app.config["SESSION_SQLALCHEMY"] = db
+Session(app)
+with app.app_context():
+    db.create_all()
 
 # Initialize CSRF protection
 csrf = CSRFProtect(app)
@@ -80,6 +100,27 @@ def inject_posthog():
 
 # Initialize rate limiter (disabled in development)
 if not DEBUG_MODE:
+    def saml_rate_limit_key() -> str:
+        """Rate-limit SAML requests by app and request fingerprint, not IP alone."""
+        app_id = ""
+        if request.view_args:
+            app_id = request.view_args.get("app_id", "")
+        if not app_id:
+            app_id = (
+                request.args.get("sp_entity_id")
+                or request.form.get("sp_entity_id")
+                or ""
+            )
+        saml_fragment = (
+            request.args.get("SAMLRequest")
+            or request.args.get("SAMLResponse")
+            or request.form.get("SAMLRequest")
+            or request.form.get("SAMLResponse")
+            or ""
+        )
+        fingerprint = saml_fragment[:48]
+        return f"{request.remote_addr}:{request.path}:{app_id}:{fingerprint}"
+
     limiter = Limiter(
         app=app,
         key_func=get_remote_address,
@@ -89,12 +130,20 @@ if not DEBUG_MODE:
 
     # Apply stricter rate limits to auth endpoints
     limiter.limit("5 per minute")(auth_bp)
+    limiter.limit("120 per minute", key_func=saml_rate_limit_key)(saml_bp)
+    limiter.limit("60 per minute", key_func=saml_rate_limit_key)(saml_launch_bp)
 else:
     # No rate limiting in development mode
     print("DEBUG: Rate limiting disabled in development mode")
 
+# Run periodic in-process cleanup for rate-limiter memory and ephemeral tables.
+if not DEBUG_MODE:
+    start_cleanup_thread()
+
 # Register blueprints
 app.register_blueprint(auth_bp)
+app.register_blueprint(saml_bp)
+app.register_blueprint(saml_launch_bp)
 app.register_blueprint(admin_bp)
 # app.register_blueprint(admin_database_bp)  # DEPRECATED: Database swap feature obsolete with Teable
 app.register_blueprint(opt_out_bp)
@@ -113,6 +162,9 @@ csrf.exempt(api_bp)
 app.register_blueprint(oauth_bp)
 csrf.exempt(oauth_bp)
 
+# Public SAML protocol endpoints accept SP posts and redirects.
+csrf.exempt(saml_bp)
+
 # Import and register event admin blueprint
 from routes.event_admin import event_admin_bp
 
@@ -123,6 +175,32 @@ app.register_blueprint(event_admin_bp)
 @app.after_request
 def add_security_headers(response):
     """Add security headers to all responses."""
+    def normalize_form_action_source(value: str, include_path: bool = False) -> str:
+        parsed = urlparse((value or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        if include_path:
+            path = parsed.path or ""
+            return f"{parsed.scheme}://{parsed.netloc}{path}"
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    form_action_sources = ["'self'"]
+    saml_form_action_origin = normalize_form_action_source(
+        getattr(g, "saml_form_action_origin", ""),
+        include_path=False,
+    )
+    saml_form_action_destination = normalize_form_action_source(
+        getattr(g, "saml_form_action_destination", ""),
+        include_path=True,
+    )
+    saml_form_action_allow_https = bool(getattr(g, "saml_form_action_allow_https", False))
+
+    for source in (saml_form_action_origin, saml_form_action_destination):
+        if source and source not in form_action_sources:
+            form_action_sources.append(source)
+    if saml_form_action_allow_https and "https:" not in form_action_sources:
+        form_action_sources.append("https:")
+
     # Content Security Policy
     nonce = g.get("csp_nonce", "")
     csp = (
@@ -132,6 +210,7 @@ def add_security_headers(response):
         "img-src 'self' data: https:; "
         "font-src 'self' https://fonts.gstatic.com; "
         "connect-src 'self' https://us.i.posthog.com; "
+        f"form-action {' '.join(form_action_sources)}; "
         "frame-ancestors 'none';"
     )
     response.headers["Content-Security-Policy"] = csp
@@ -147,6 +226,9 @@ def add_security_headers(response):
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
         )
+
+    if DEBUG_MODE and request.path.startswith("/saml/"):
+        response.headers["X-Debug-SAML-Form-Action"] = " ".join(form_action_sources)
 
     return response
 
@@ -268,6 +350,20 @@ def verify_teable_tables():
         print("  3. Your TEABLE_ACCESS_TOKEN has access to these tables\n")
         exit(1)
 
+    try:
+        acl_count = count_records("app_access_entries")
+        if acl_count >= 900:
+            print(
+                f"⚠️  ACL table has {acl_count} rows. Pagination is deferred; "
+                "auth-path ACL reads currently assume <1000 rows."
+            )
+        if APP_ACL_MAX_ENTRIES >= 1000:
+            print(
+                "⚠️  APP_ACL_MAX_ENTRIES should remain below 1000 until paginated ACL reads are implemented."
+            )
+    except Exception as exc:
+        print(f"⚠️  Unable to check ACL table count: {exc}")
+
     print("✅ All Teable tables are accessible!\n")
 
 
@@ -288,10 +384,6 @@ if __name__ == "__main__":
     if DEBUG_MODE:
         list_all_tables()
         check_table_exists("oauth_tokens")
-
-    # Start rate limiter cleanup thread (only in production)
-    if not DEBUG_MODE:
-        start_cleanup_thread()
 
     # Determine port based on environment
     port = int(os.getenv("PORT", 3000))

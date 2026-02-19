@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}SAML Sign In{% endblock %}
+{% block head %}
+<style nonce="{{ g.csp_nonce }}">
+    .saml-post-box {
+        max-width: 560px;
+        margin: 48px auto;
+        text-align: center;
+    }
+    .saml-post-title {
+        font-family: 'Nunito Sans', sans-serif;
+        margin-bottom: 10px;
+    }
+    .saml-post-subtitle,
+    .saml-post-fallback {
+        font-family: 'Nunito Sans', sans-serif;
+        color: #444;
+    }
+    .saml-post-subtitle {
+        margin-bottom: 20px;
+    }
+    .saml-post-fallback {
+        margin: 14px 0 10px;
+    }
+</style>
+{% endblock %}
+{% block body %}
+<div class="container auth-box saml-post-box">
+    <h1 class="saml-post-title">Completing sign in...</h1>
+    <p class="saml-post-subtitle">
+        You are being redirected to the service provider.
+    </p>
+    <form id="saml-post-form" method="post" action="{{ destination }}">
+        <input type="hidden" name="SAMLResponse" value="{{ saml_response }}" />
+        {% if relay_state %}
+        <input type="hidden" name="RelayState" value="{{ relay_state }}" />
+        {% endif %}
+        <p id="saml-fallback-text" class="saml-post-fallback">
+            If you are not redirected automatically, click continue.
+        </p>
+        <button type="submit" class="button" id="saml-manual-continue">Continue</button>
+    </form>
+</div>
+<script nonce="{{ g.csp_nonce }}">
+    const form = document.getElementById('saml-post-form');
+    const fallbackText = document.getElementById('saml-fallback-text');
+    let attempted = false;
+
+    function submitSamlForm() {
+        if (!form || attempted) {
+            return;
+        }
+        attempted = true;
+        try {
+            form.submit();
+        } catch (error) {
+            attempted = false;
+            if (fallbackText) {
+                fallbackText.textContent = 'Automatic redirect was blocked. Click continue.';
+            }
+        }
+    }
+
+    if (form) {
+        window.setTimeout(submitSamlForm, 75);
+    }
+</script>
+{% endblock %}

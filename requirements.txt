@@ -20,6 +20,7 @@ filelock==3.19.1
 Flask==3.1.1
 Flask-Limiter==3.12
 Flask-Session==0.8.0
+Flask-SQLAlchemy==3.1.1
 Flask-WTF==1.2.2
 frozenlist==1.6.0
 git-filter-repo==2.47.0
@@ -57,6 +58,7 @@ Pygments==2.19.2
 PyJWT==2.10.1
 pyparsing==3.2.3
 python-dotenv==1.0.0
+pysaml2==7.5.2
 pytz==2025.2
 requests==2.32.5
 rich==13.9.4

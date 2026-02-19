@@ -1,6 +1,4 @@
 """Admin routes for user and API key management."""
-
-import json
 from flask import (
     Blueprint,
     render_template,
@@ -8,7 +6,9 @@ from flask import (
     request,
     session,
     jsonify,
+    make_response,
 )
+from config import DEBUG_MODE
 
 # CSRF exemption will be handled in app.py
 from models.user import get_all_users
@@ -25,14 +25,15 @@ from models.admin import (
     get_all_admins,
     add_admin,
     remove_admin,
-    get_admin_stats,
     get_admin_permissions,
     grant_permission,
     revoke_permission,
-    is_system_admin,
     has_page_permission,
 )
 from models.app import (
+    APP_TYPE_OAUTH,
+    APP_TYPE_SAML,
+    SUPPORTED_APP_TYPES,
     get_all_apps,
     create_app,
     update_app,
@@ -40,8 +41,29 @@ from models.app import (
     get_app_by_id,
     regenerate_client_secret,
 )
+from services.app_access_service import (
+    get_acl_entries_for_admin,
+    replace_app_acl_entries,
+    log_if_restricted_app_acl_empty,
+)
+from services.universal_admin_snapshot import write_universal_admin_snapshot
+from services.saml_audit_service import get_saml_audit_events, log_saml_event
+from services.saml_metadata_service import (
+    apply_staged_metadata_update,
+    check_metadata_url_health,
+    reject_staged_metadata_update,
+    stage_app_metadata_update,
+    validate_attribute_mapping,
+)
 
 admin_bp = Blueprint("admin", __name__)
+
+
+def refresh_universal_admin_snapshot():
+    """Refresh universal-write admin snapshot for fail-open eligibility."""
+    if "user_email" not in session:
+        return
+    write_universal_admin_snapshot(session["user_email"], session)
 
 
 def require_admin(f):
@@ -78,6 +100,117 @@ def get_admin_page_permissions():
     return permissions
 
 
+def get_admin_layout_context():
+    """Common template context for admin layout pages."""
+    return {
+        "admin_name": session.get("user_name", "Admin"),
+        "permissions": get_admin_page_permissions(),
+        "acl_fail_open_used": bool(session.get("acl_fail_open_used")),
+    }
+
+
+def _as_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _parse_json_array_text(value):
+    import json
+
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, list):
+            raise ValueError("Expected JSON array")
+        return parsed
+    raise ValueError("Expected JSON array")
+
+
+def _extract_app_payload(data):
+    app_type = (data.get("app_type") or APP_TYPE_OAUTH).strip().lower()
+    if app_type not in SUPPORTED_APP_TYPES:
+        raise ValueError("Invalid app_type")
+
+    payload = {
+        "name": (data.get("name") or "").strip(),
+        "icon": (data.get("icon") or "").strip(),
+        "app_type": app_type,
+        "allow_anyone": _as_bool(data.get("allow_anyone"), False),
+    }
+
+    if app_type == APP_TYPE_OAUTH:
+        payload["redirect_uris"] = data.get("redirect_uris", [])
+        payload["allowed_scopes"] = data.get("allowed_scopes", ["profile", "email"])
+        payload["skip_consent_screen"] = _as_bool(data.get("skip_consent_screen"), False)
+
+        forbidden = [
+            key
+            for key in (
+                "saml_metadata_url",
+                "saml_entity_id",
+                "saml_acs_url",
+                "saml_acs_binding",
+                "saml_slo_url",
+                "saml_nameid_format",
+                "saml_attribute_mapping",
+                "saml_require_signed_authn_request",
+                "saml_enabled",
+                "saml_sp_signing_certs_json",
+            )
+            if key in data and data.get(key) not in (None, "", [], {})
+        ]
+        if forbidden:
+            raise ValueError(f"OAuth apps cannot include SAML fields: {', '.join(forbidden)}")
+    else:
+        if _as_bool(data.get("allow_anyone"), False):
+            raise ValueError("allow_anyone is not permitted for SAML apps")
+        payload["allow_anyone"] = False
+        payload["saml_metadata_url"] = (data.get("saml_metadata_url") or "").strip()
+        payload["saml_entity_id"] = (data.get("saml_entity_id") or "").strip()
+        payload["saml_acs_url"] = (data.get("saml_acs_url") or "").strip()
+        payload["saml_acs_binding"] = (data.get("saml_acs_binding") or "").strip()
+        payload["saml_slo_url"] = (data.get("saml_slo_url") or "").strip()
+        payload["saml_nameid_format"] = (data.get("saml_nameid_format") or "").strip()
+        payload["saml_require_signed_authn_request"] = _as_bool(
+            data.get("saml_require_signed_authn_request"),
+            False,
+        )
+        payload["saml_enabled"] = _as_bool(data.get("saml_enabled"), False)
+
+        if "redirect_uris" in data and data.get("redirect_uris"):
+            raise ValueError("SAML apps cannot include redirect_uris")
+        if "allowed_scopes" in data and data.get("allowed_scopes"):
+            raise ValueError("SAML apps cannot include allowed_scopes")
+        if "skip_consent_screen" in data and data.get("skip_consent_screen") not in (None, False, "", 0):
+            raise ValueError("SAML apps cannot include skip_consent_screen")
+
+        saml_mapping = data.get("saml_attribute_mapping")
+        if saml_mapping is not None and saml_mapping != "":
+            valid, error = validate_attribute_mapping(saml_mapping)
+            if not valid:
+                raise ValueError(error)
+            payload["saml_attribute_mapping"] = saml_mapping
+
+        certs_raw = data.get("saml_sp_signing_certs_json")
+        if certs_raw not in (None, ""):
+            certs_parsed = _parse_json_array_text(certs_raw)
+            import json
+            payload["saml_sp_signing_certs_json"] = json.dumps(certs_parsed)
+
+    return payload
+
+
 def require_page_permission(page_name, access_level="read"):
     """Decorator to require specific page permission."""
     def decorator(f):
@@ -95,7 +228,43 @@ def require_page_permission(page_name, access_level="read"):
                     "error": f"You don't have permission to access this page. Required: {page_name} ({access_level})"
                 }), 403
 
-            return f(*args, **kwargs)
+            result = f(*args, **kwargs)
+            response = make_response(result)
+            if access_level == "write" and response.status_code < 400:
+                refresh_universal_admin_snapshot()
+            return result
+
+        wrapper.__name__ = f.__name__
+        return wrapper
+    return decorator
+
+
+def require_page_permission_html(page_name, access_level="read"):
+    """Decorator to require page permission and render HTML 403 on denial."""
+    def decorator(f):
+        def wrapper(*args, **kwargs):
+            if "user_email" not in session:
+                return redirect("/")
+
+            if not is_admin(session["user_email"]):
+                return render_template(
+                    "admin_forbidden.html",
+                    required_page=page_name,
+                    required_access=access_level,
+                ), 403
+
+            if not has_page_permission(session["user_email"], page_name, access_level):
+                return render_template(
+                    "admin_forbidden.html",
+                    required_page=page_name,
+                    required_access=access_level,
+                ), 403
+
+            result = f(*args, **kwargs)
+            response = make_response(result)
+            if access_level == "write" and response.status_code < 400:
+                refresh_universal_admin_snapshot()
+            return result
 
         wrapper.__name__ = f.__name__
         return wrapper
@@ -112,16 +281,14 @@ def admin_redirect():
 @require_admin
 def admin_dashboard():
     """Admin dashboard - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/attendees")
 @require_admin
 def admin_attendees():
     """Admin attendees page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/users/data", methods=["GET"])
@@ -162,8 +329,7 @@ def get_users_data():
 @require_admin
 def admin_events():
     """Admin events page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/events/data", methods=["GET"])
@@ -212,8 +378,7 @@ def get_events_data():
 @require_admin
 def admin_keys():
     """Admin API keys page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 
 @admin_bp.route("/admin/update-user", methods=["POST"])
@@ -383,8 +548,7 @@ def get_api_key_logs_route(key_id):
 @require_admin
 def admin_admins():
     """Admin admins page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 @admin_bp.route("/admin/admins/data", methods=["GET"])
 @require_page_permission("admins", "read")
@@ -529,42 +693,89 @@ def get_apps_route():
         return jsonify({"success": False, "error": str(e)})
 
 
+@admin_bp.route("/admin/apps/<app_id>/access", methods=["GET"])
+@require_page_permission("apps", "read")
+def get_app_access_route(app_id):
+    """Get ACL entries for a single app."""
+    try:
+        app = get_app_by_id(app_id)
+        if not app:
+            return jsonify({"success": False, "error": "App not found"}), 404
+
+        entries = get_acl_entries_for_admin(app_id)
+        return jsonify({"success": True, "entries": entries})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@admin_bp.route("/admin/apps/<app_id>/access", methods=["PUT"])
+@require_page_permission("apps", "write")
+def put_app_access_route(app_id):
+    """Replace ACL entries for a single app."""
+    try:
+        app = get_app_by_id(app_id)
+        if not app:
+            return jsonify({"success": False, "error": "App not found"}), 404
+
+        data = request.get_json() or {}
+        entries = data.get("entries", [])
+
+        result = replace_app_acl_entries(
+            app=app,
+            entries=entries,
+            actor_email=session["user_email"],
+        )
+        status = 200 if result.get("success") else 400
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @admin_bp.route("/admin/apps")
-@require_admin
+@require_page_permission_html("apps", "read")
 def admin_apps():
     """Admin apps page - new layout."""
-    permissions = get_admin_page_permissions()
-    return render_template("admin_layout.html", admin_name=session.get("user_name", "Admin"), permissions=permissions)
+    return render_template("admin_layout.html", **get_admin_layout_context())
 
 @admin_bp.route("/admin/apps", methods=["POST"])
 @require_page_permission("apps", "write")
 def create_app_route():
-    """Create a new OAuth 2.0 app."""
+    """Create a new OAuth or SAML app."""
     try:
-        data = request.get_json()
-        name = data.get("name")
-        redirect_uris = data.get("redirect_uris", [])
-        icon = data.get("icon")
-        allowed_scopes = data.get("allowed_scopes", ["profile", "email"])
-        allow_anyone = data.get("allow_anyone", False)
-        skip_consent_screen = data.get("skip_consent_screen", False)
+        data = request.get_json() or {}
+        payload = _extract_app_payload(data)
 
-        if not name:
+        if not payload["name"]:
             return jsonify({"success": False, "error": "Name is required"})
-
-        if not redirect_uris or len(redirect_uris) == 0:
+        if payload["app_type"] == APP_TYPE_OAUTH and (
+            not payload.get("redirect_uris") or len(payload.get("redirect_uris")) == 0
+        ):
             return jsonify({"success": False, "error": "At least one redirect URI is required"})
 
-        result = create_app(
-            name=name,
-            redirect_uris=redirect_uris,
-            created_by=session["user_email"],
-            icon=icon,
-            allowed_scopes=allowed_scopes,
-            allow_anyone=allow_anyone,
-            skip_consent_screen=skip_consent_screen
-        )
+        result = create_app(created_by=session["user_email"], **payload)
+        if result.get("success"):
+            created_app = get_app_by_id(result.get("app_id"))
+            if created_app:
+                log_if_restricted_app_acl_empty(
+                    app=created_app,
+                    actor_email=session["user_email"],
+                    path=request.path,
+                )
+                log_saml_event(
+                    event_type="app_config_change",
+                    app_id=created_app.get("id"),
+                    user_email=session["user_email"],
+                    sp_entity_id=created_app.get("saml_entity_id"),
+                    outcome="success",
+                    reason="app_created",
+                    details={
+                        "app_type": created_app.get("app_type"),
+                        "allow_anyone": bool(created_app.get("allow_anyone")),
+                    },
+                )
         return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -572,19 +783,41 @@ def create_app_route():
 @admin_bp.route("/admin/apps/<app_id>", methods=["PUT"])
 @require_page_permission("apps", "write")
 def update_app_route(app_id):
-    """Update an OAuth 2.0 app."""
+    """Update an OAuth or SAML app."""
     try:
-        data = request.get_json()
-        result = update_app(
-            app_id,
-            name=data.get("name"),
-            icon=data.get("icon"),
-            redirect_uris=data.get("redirect_uris"),
-            allowed_scopes=data.get("allowed_scopes"),
-            allow_anyone=data.get("allow_anyone"),
-            skip_consent_screen=data.get("skip_consent_screen")
-        )
+        existing_app = get_app_by_id(app_id)
+        if not existing_app:
+            return jsonify({"success": False, "error": "App not found"}), 404
+
+        data = request.get_json() or {}
+        if "app_type" not in data:
+            data["app_type"] = existing_app.get("app_type", APP_TYPE_OAUTH)
+        payload = _extract_app_payload(data)
+        result = update_app(app_id, **payload)
+        if result.get("success"):
+            updated_app = get_app_by_id(app_id)
+            if updated_app:
+                log_if_restricted_app_acl_empty(
+                    app=updated_app,
+                    actor_email=session["user_email"],
+                    path=request.path,
+                )
+                log_saml_event(
+                    event_type="app_config_change",
+                    app_id=updated_app.get("id"),
+                    user_email=session["user_email"],
+                    sp_entity_id=updated_app.get("saml_entity_id"),
+                    outcome="success",
+                    reason="app_updated",
+                    details={
+                        "app_type": updated_app.get("app_type"),
+                        "allow_anyone": bool(updated_app.get("allow_anyone")),
+                        "saml_enabled": bool(updated_app.get("saml_enabled")),
+                    },
+                )
         return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -605,10 +838,168 @@ def regenerate_app_secret_route(app_id):
 def delete_app_route(app_id):
     """Delete (deactivate) an app."""
     try:
+        app = get_app_by_id(app_id)
         result = delete_app(app_id)
+        if result.get("success") and app:
+            log_saml_event(
+                event_type="app_config_change",
+                app_id=app.get("id"),
+                user_email=session["user_email"],
+                sp_entity_id=app.get("saml_entity_id"),
+                outcome="success",
+                reason="app_deactivated",
+                details={"app_type": app.get("app_type")},
+            )
         return jsonify(result)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+@admin_bp.route("/admin/apps/<app_id>/saml/fetch-metadata", methods=["POST"])
+@require_page_permission("apps", "write")
+def saml_fetch_metadata_route(app_id):
+    """Fetch and stage metadata for a SAML app."""
+    app = get_app_by_id(app_id)
+    if not app:
+        return jsonify({"success": False, "error": "App not found"}), 404
+    if app.get("app_type") != APP_TYPE_SAML:
+        return jsonify({"success": False, "error": "Metadata sync is only available for SAML apps"}), 400
+
+    data = request.get_json() or {}
+    metadata_url = (data.get("saml_metadata_url") or app.get("saml_metadata_url") or "").strip()
+    if not metadata_url:
+        return jsonify({"success": False, "error": "saml_metadata_url is required"}), 400
+
+    health = check_metadata_url_health(metadata_url)
+    if not health.get("success"):
+        update_app(app_id, saml_metadata_sync_error=health.get("error", "metadata fetch failed"))
+        log_saml_event(
+            event_type="metadata_sync",
+            app_id=app_id,
+            user_email=session["user_email"],
+            sp_entity_id=app.get("saml_entity_id"),
+            outcome="error",
+            reason=health.get("error", "metadata fetch failed"),
+        )
+        return jsonify(health), 400
+
+    staged = stage_app_metadata_update(app_id, health["incoming"])
+    if not staged.get("success"):
+        return jsonify(staged), 400
+
+    has_material_change = bool(staged["pending"]["diff"].get("has_material_change"))
+    auto_applied = False
+    if not has_material_change:
+        apply_result = apply_staged_metadata_update(app_id)
+        auto_applied = bool(apply_result.get("success"))
+
+    log_saml_event(
+        event_type="metadata_sync",
+        app_id=app_id,
+        user_email=session["user_email"],
+        sp_entity_id=app.get("saml_entity_id"),
+        outcome="success",
+        reason="metadata_staged",
+        details={
+            "has_material_change": has_material_change,
+            "auto_applied": auto_applied,
+        },
+    )
+
+    return jsonify(
+        {
+            "success": True,
+            "pending": staged["pending"],
+            "requires_approval": has_material_change,
+            "auto_applied": auto_applied,
+        }
+    )
+
+
+@admin_bp.route("/admin/apps/<app_id>/saml/approve-metadata", methods=["POST"])
+@require_page_permission("apps", "write")
+def saml_approve_metadata_route(app_id):
+    """Approve staged metadata changes."""
+    app = get_app_by_id(app_id)
+    if not app:
+        return jsonify({"success": False, "error": "App not found"}), 404
+    if app.get("app_type") != APP_TYPE_SAML:
+        return jsonify({"success": False, "error": "Metadata approval is only available for SAML apps"}), 400
+
+    result = apply_staged_metadata_update(app_id)
+    status = 200 if result.get("success") else 400
+
+    log_saml_event(
+        event_type="metadata_sync",
+        app_id=app_id,
+        user_email=session["user_email"],
+        sp_entity_id=app.get("saml_entity_id"),
+        outcome="success" if result.get("success") else "error",
+        reason="metadata_approved",
+    )
+    return jsonify(result), status
+
+
+@admin_bp.route("/admin/apps/<app_id>/saml/reject-metadata", methods=["POST"])
+@require_page_permission("apps", "write")
+def saml_reject_metadata_route(app_id):
+    """Reject staged metadata changes."""
+    app = get_app_by_id(app_id)
+    if not app:
+        return jsonify({"success": False, "error": "App not found"}), 404
+    if app.get("app_type") != APP_TYPE_SAML:
+        return jsonify({"success": False, "error": "Metadata rejection is only available for SAML apps"}), 400
+
+    result = reject_staged_metadata_update(app_id)
+    status = 200 if result.get("success") else 400
+
+    log_saml_event(
+        event_type="metadata_sync",
+        app_id=app_id,
+        user_email=session["user_email"],
+        sp_entity_id=app.get("saml_entity_id"),
+        outcome="success" if result.get("success") else "error",
+        reason="metadata_rejected",
+    )
+    return jsonify(result), status
+
+
+@admin_bp.route("/admin/apps/<app_id>/saml/sync-status", methods=["GET"])
+@require_page_permission("apps", "read")
+def saml_sync_status_route(app_id):
+    """Return metadata sync status for a SAML app."""
+    app = get_app_by_id(app_id)
+    if not app:
+        return jsonify({"success": False, "error": "App not found"}), 404
+    if app.get("app_type") != APP_TYPE_SAML:
+        return jsonify({"success": False, "error": "Sync status only applies to SAML apps"}), 400
+
+    return jsonify(
+        {
+            "success": True,
+            "status": {
+                "metadata_url": app.get("saml_metadata_url"),
+                "etag": app.get("saml_metadata_etag"),
+                "last_fetched_at": app.get("saml_metadata_last_fetched_at"),
+                "last_applied_at": app.get("saml_metadata_last_applied_at"),
+                "pending_diff": app.get("saml_metadata_pending_diff_obj"),
+                "sync_error": app.get("saml_metadata_sync_error"),
+            },
+        }
+    )
+
+
+@admin_bp.route("/admin/apps/<app_id>/saml/audit", methods=["GET"])
+@require_page_permission("apps", "read")
+def saml_audit_route(app_id):
+    """Return SAML audit events for an app from SQLite store."""
+    app = get_app_by_id(app_id)
+    if not app:
+        return jsonify({"success": False, "error": "App not found"}), 404
+    limit = request.args.get("limit", default=100, type=int)
+    limit = max(1, min(limit, 1000))
+    events = get_saml_audit_events(app_id=app_id, limit=limit)
+    return jsonify({"success": True, "events": events})
 
 
 # Current Event Data Routes

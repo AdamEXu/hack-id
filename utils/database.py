@@ -22,6 +22,7 @@ def get_db_connection():
     For persistent data, use Teable via models/*.py
     """
     conn = sqlite3.connect(DATABASE)
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.row_factory = sqlite3.Row
     return conn
 

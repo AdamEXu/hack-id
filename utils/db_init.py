@@ -9,11 +9,17 @@ Ephemeral tables created here:
 - opt_out_tokens: Privacy deletion tokens (permanent links but not user data)
 - oauth_tokens: OAuth session tokens (temporary)
 - api_key_logs: API usage logs (ephemeral, can be purged)
+- group_membership_cache: Short-lived ACL group membership cache
+- saml_sp_sessions: App-scoped SLO session index mappings
+- saml_request_replay: Replay-protection window for SAML request IDs
+- saml_audit_events: SAML protocol and admin audit trail
+- flask_sessions: Server-side Flask session storage
 """
 
 import sqlite3
 import sys
 import os
+import time
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -164,6 +170,114 @@ def init_db():
     )
     print("  ✓ oauth_tokens table (legacy)")
 
+    # Group membership cache table for ACL evaluation (EPHEMERAL)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_membership_cache (
+            group_key TEXT PRIMARY KEY,
+            members_json TEXT NOT NULL,
+            computed_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+    """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_cache_expires ON group_membership_cache(expires_at)"
+    )
+    print("  ✓ group_membership_cache table")
+
+    # SAML SP sessions for app-scoped logout handling (EPHEMERAL)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saml_sp_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            name_id TEXT NOT NULL,
+            session_index TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+    """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_sp_sessions_app ON saml_sp_sessions(app_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_sp_sessions_user ON saml_sp_sessions(user_email)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_sp_sessions_index ON saml_sp_sessions(session_index)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_sp_sessions_expires ON saml_sp_sessions(expires_at)"
+    )
+    print("  ✓ saml_sp_sessions table")
+
+    # SAML replay protection table (EPHEMERAL)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saml_request_replay (
+            request_id TEXT PRIMARY KEY,
+            app_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+    """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_request_replay_expires ON saml_request_replay(expires_at)"
+    )
+    print("  ✓ saml_request_replay table")
+
+    # SAML audit events (retained with cleanup policy)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saml_audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            app_id TEXT,
+            user_email TEXT,
+            sp_entity_id TEXT,
+            request_id TEXT,
+            session_index TEXT,
+            outcome TEXT NOT NULL,
+            reason TEXT,
+            details_json TEXT DEFAULT '{}',
+            created_at INTEGER NOT NULL
+        )
+    """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_audit_events_app ON saml_audit_events(app_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_audit_events_user ON saml_audit_events(user_email)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saml_audit_events_created ON saml_audit_events(created_at)"
+    )
+    print("  ✓ saml_audit_events table")
+
+    # Flask-Session SQLAlchemy compatibility table.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS flask_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE,
+            data BLOB,
+            expiry INTEGER
+        )
+    """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flask_sessions_session_id ON flask_sessions(session_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flask_sessions_expiry ON flask_sessions(expiry)"
+    )
+    print("  ✓ flask_sessions table")
+
     try:
         conn.commit()
         conn.close()
@@ -207,6 +321,40 @@ def list_all_tables():
     except Exception as e:
         print(f"Error listing tables: {e}")
         return []
+
+
+def cleanup_expired_records() -> dict:
+    """Cleanup expired ephemeral rows for OAuth/SAML/session tables."""
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    now_epoch = int(time.time())
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S")
+    cleanup_counts = {}
+
+    cleanup_sql = {
+        "authorization_codes": ("DELETE FROM authorization_codes WHERE expires_at < ?", (now_iso,)),
+        "access_tokens": ("DELETE FROM access_tokens WHERE expires_at < ? OR revoked = TRUE", (now_iso,)),
+        "oauth_tokens": ("DELETE FROM oauth_tokens WHERE expires_at < ?", (now_iso,)),
+        "verification_tokens": ("DELETE FROM verification_tokens WHERE expires_at < ? OR used = TRUE", (now_iso,)),
+        "saml_sp_sessions": ("DELETE FROM saml_sp_sessions WHERE expires_at < ?", (now_epoch,)),
+        "saml_request_replay": ("DELETE FROM saml_request_replay WHERE expires_at < ?", (now_epoch,)),
+        # One-year retention for SAML audit.
+        "saml_audit_events": ("DELETE FROM saml_audit_events WHERE created_at < ?", (now_epoch - 365 * 24 * 60 * 60,)),
+        "flask_sessions": ("DELETE FROM flask_sessions WHERE expiry IS NOT NULL AND expiry < ?", (now_epoch,)),
+    }
+
+    try:
+        for table_name, (query, params) in cleanup_sql.items():
+            try:
+                cursor.execute(query, params)
+                cleanup_counts[table_name] = cursor.rowcount
+            except Exception:
+                cleanup_counts[table_name] = -1
+        conn.commit()
+    finally:
+        conn.close()
+
+    return cleanup_counts
 
 
 if __name__ == "__main__":

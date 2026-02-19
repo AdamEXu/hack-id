@@ -176,6 +176,8 @@ def exchange_code_for_token(
 
     if not app:
         return {"success": False, "error": "invalid_client"}
+    if app.get("app_type", "oauth") != "oauth":
+        return {"success": False, "error": "invalid_client"}
 
     if DEBUG_MODE:
         print(f"Comparing secrets: provided={client_secret[:10]}... vs stored={app.get('client_secret', '')[:10]}...")
@@ -297,4 +299,3 @@ def cleanup_expired_tokens() -> int:
     conn.close()
 
     return deleted
-

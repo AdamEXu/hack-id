@@ -91,6 +91,18 @@
 
         <!-- Content Area -->
         <div class="content-area">
+            {% if acl_fail_open_used %}
+            <div class="warning-box" id="acl-fail-open-banner">
+                <div class="warning-box-content">
+                    <span class="material-icons warning-box-icon">warning</span>
+                    <div>
+                        <strong class="warning-box-title">ACL fail-open was used in this session</strong>
+                        <p class="warning-box-text">A restricted app authorization was allowed due to ACL evaluation error and a valid universal admin snapshot. Review logs for `acl_fail_open_used`.</p>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- Home Page -->
             <div class="page-content active" id="page-home">
                 <h1>Admin Dashboard</h1>
@@ -175,65 +187,206 @@
 
         <!-- Add/Edit App Modal -->
         <div id="app-modal" class="modal">
-            <div class="modal-header">
-                <h2 id="app-modal-title">Add App</h2>
+            <div class="modal-header app-modal-header">
+                <div>
+                    <h2 id="app-modal-title">Add App</h2>
+                    <p class="app-modal-subtitle">Configure metadata, scopes, and who can launch this app.</p>
+                </div>
                 <button class="modal-close" data-modal="app-modal">&times;</button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body app-modal-body">
                 <input type="hidden" id="app-id" />
 
-                <label>Name:</label>
-                <input type="text" id="app-name" placeholder="My Application" />
-
-                <label>Icon (emoji):</label>
-                <input type="text" id="app-icon" placeholder="🔗" />
+                <section class="app-modal-section">
+                    <div class="app-section-head">
+                        <h3>App Identity</h3>
+                        <small>Name and icon shown on consent and internal admin surfaces.</small>
+                    </div>
+                    <div class="app-modal-grid app-modal-grid-basic">
+                        <label class="app-field">
+                            <span>App name</span>
+                            <input type="text" id="app-name" placeholder="My Application" />
+                        </label>
+                        <label class="app-field">
+                            <span>App type</span>
+                            <select id="app-type">
+                                <option value="oauth">OAuth</option>
+                                <option value="saml">SAML</option>
+                            </select>
+                        </label>
+                        <label class="app-field">
+                            <span>Icon</span>
+                            <input type="text" id="app-icon" placeholder="🔗" />
+                            <small>Emoji or short symbol.</small>
+                        </label>
+                    </div>
+                </section>
 
                 <!-- OAuth 2.0 Credentials (shown only when editing) -->
-                <div id="app-credentials" class="oauth-credentials-box hidden">
-                    <h3>OAuth 2.0 Credentials</h3>
-
-                    <label>Client ID:</label>
-                    <div class="credential-field-row">
-                        <input type="text" id="app-client-id" readonly />
-                        <button type="button" class="btn-secondary" onclick="copyToClipboard('app-client-id')">Copy</button>
+                <section id="app-credentials" class="oauth-credentials-box hidden">
+                    <div class="app-section-head">
+                        <h3>OAuth Credentials</h3>
+                        <small>Existing credentials for this app. Treat client secrets like passwords.</small>
                     </div>
+                    <label class="app-field">
+                        <span>Client ID</span>
+                        <div class="credential-field-row">
+                            <input type="text" id="app-client-id" readonly />
+                            <button type="button" class="btn-secondary" onclick="copyToClipboard('app-client-id')">Copy</button>
+                        </div>
+                    </label>
+                    <label class="app-field">
+                        <span>Client Secret</span>
+                        <div class="credential-field-row">
+                            <input type="password" id="app-client-secret" readonly />
+                            <button type="button" class="btn-secondary" onclick="toggleSecretVisibility(event)">Show</button>
+                            <button type="button" class="btn-secondary" onclick="copyToClipboard('app-client-secret')">Copy</button>
+                            <button type="button" class="btn-primary" onclick="regenerateSecret()">Regenerate</button>
+                        </div>
+                    </label>
+                </section>
 
-                    <label>Client Secret:</label>
-                    <div class="credential-field-row">
-                        <input type="password" id="app-client-secret" readonly />
-                        <button type="button" class="btn-secondary" onclick="toggleSecretVisibility(event)">Show</button>
-                        <button type="button" class="btn-secondary" onclick="copyToClipboard('app-client-secret')">Copy</button>
-                        <button type="button" class="btn-primary" onclick="regenerateSecret()">Regenerate</button>
+                <section class="app-modal-section" id="oauth-config-section">
+                    <div class="app-section-head">
+                        <h3>OAuth Configuration</h3>
+                        <small>Redirect URI matching is strict and case-sensitive.</small>
                     </div>
-                </div>
+                    <label class="app-field">
+                        <span>Redirect URIs</span>
+                        <textarea id="app-redirect-uris" rows="5" placeholder="https://example.com/callback&#10;https://example.com/auth/callback"></textarea>
+                        <small>One URI per line.</small>
+                    </label>
+                </section>
 
-                <label>Redirect URIs (one per line):</label>
-                <textarea id="app-redirect-uris" rows="4" placeholder="https://example.com/callback&#10;https://example.com/auth/callback"></textarea>
-                <small>OAuth 2.0 requires exact URI matching for security</small>
-
-                <div class="permission-section">
-                    <div class="permission-section-header">
+                <section class="permission-section app-modal-section" id="oauth-scopes-section">
+                    <div class="permission-section-header app-section-head">
                         <h3>Allowed Scopes</h3>
-                        <small>What data can this app access?</small>
+                        <small>Select the minimum data access required.</small>
                     </div>
                     <div id="app-scopes" class="permission-grid">
                         <p class="muted">Loading scopes...</p>
                     </div>
-                </div>
+                </section>
 
-                <label class="checkbox-label">
-                    <input type="checkbox" id="app-allow-anyone" />
-                    Allow anyone to access this app (not just admins)
-                </label>
+                <section class="app-modal-section hidden" id="saml-config-section">
+                    <div class="app-section-head">
+                        <h3>SAML Configuration</h3>
+                        <small>Configure SP metadata and assertion behavior.</small>
+                    </div>
+                    <label class="app-field">
+                        <span>Metadata URL</span>
+                        <input type="text" id="app-saml-metadata-url" placeholder="https://example.com/metadata.xml" />
+                    </label>
+                    <div class="app-modal-grid">
+                        <label class="app-field">
+                            <span>SP Entity ID</span>
+                            <input type="text" id="app-saml-entity-id" placeholder="https://sp.example.com/metadata" />
+                        </label>
+                        <label class="app-field">
+                            <span>ACS URL</span>
+                            <input type="text" id="app-saml-acs-url" placeholder="https://sp.example.com/saml/acs" />
+                        </label>
+                        <label class="app-field">
+                            <span>ACS Binding</span>
+                            <input type="text" id="app-saml-acs-binding" placeholder="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" />
+                        </label>
+                        <label class="app-field">
+                            <span>SLO URL</span>
+                            <input type="text" id="app-saml-slo-url" placeholder="https://sp.example.com/saml/slo" />
+                        </label>
+                        <label class="app-field">
+                            <span>NameID Format</span>
+                            <input type="text" id="app-saml-nameid-format" placeholder="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress" />
+                        </label>
+                    </div>
+                </section>
 
-                <label class="checkbox-label">
-                    <input type="checkbox" id="app-skip-consent" />
-                    Skip consent screen (auto-approve authorization)
-                </label>
+                <section class="app-modal-section hidden" id="saml-advanced-section">
+                    <div class="app-section-head">
+                        <h3>SAML Advanced</h3>
+                        <small>Attribute mapping and optional SP signing cert overrides.</small>
+                    </div>
+                    <label class="app-field">
+                        <span>Attribute Mapping (JSON array)</span>
+                        <textarea id="app-saml-attribute-mapping" rows="5" placeholder='[{"source_field":"email","saml_name":"email","required":true}]'></textarea>
+                    </label>
+                    <label class="app-field">
+                        <span>SP Signing Certs (JSON array of X509 cert strings)</span>
+                        <textarea id="app-saml-signing-certs" rows="4" placeholder='["MIIC..."]'></textarea>
+                    </label>
+                    <div class="app-toggle-grid">
+                        <label class="app-toggle-card">
+                            <input type="checkbox" id="app-saml-require-signed-request" />
+                            <span class="app-toggle-content">
+                                <strong>Require signed AuthnRequest</strong>
+                                <small>Reject unsigned or invalidly signed SAML AuthnRequests.</small>
+                            </span>
+                        </label>
+                        <label class="app-toggle-card">
+                            <input type="checkbox" id="app-saml-enabled" />
+                            <span class="app-toggle-content">
+                                <strong>Enable SAML runtime</strong>
+                                <small>Allow this app to receive SSO/SLO requests.</small>
+                            </span>
+                        </label>
+                    </div>
+                </section>
+
+                <section class="app-modal-section hidden" id="saml-metadata-actions-section">
+                    <div class="app-section-head">
+                        <h3>Metadata Sync</h3>
+                        <small>Fetch, review, and approve material metadata changes.</small>
+                    </div>
+                    <div class="access-group-row">
+                        <button type="button" class="btn-secondary" id="app-saml-fetch-metadata-btn">Fetch metadata</button>
+                        <button type="button" class="btn-secondary" id="app-saml-approve-metadata-btn">Approve staged</button>
+                        <button type="button" class="btn-secondary" id="app-saml-reject-metadata-btn">Reject staged</button>
+                    </div>
+                    <small id="app-saml-sync-status" class="muted">No sync activity yet.</small>
+                    <div id="app-saml-audit-log" class="log-list"></div>
+                </section>
+
+                <section class="app-modal-section app-toggle-grid">
+                    <label class="app-toggle-card">
+                        <input type="checkbox" id="app-allow-anyone" />
+                        <span class="app-toggle-content">
+                            <strong>Open access</strong>
+                            <small>Allow all authenticated users to launch this app.</small>
+                        </span>
+                    </label>
+
+                    <label class="app-toggle-card">
+                        <input type="checkbox" id="app-skip-consent" />
+                        <span class="app-toggle-content">
+                            <strong>Skip consent screen</strong>
+                            <small>Auto-approve authorization for internal trusted apps.</small>
+                        </span>
+                    </label>
+                </section>
+
+                <section class="permission-section app-modal-section">
+                    <div class="permission-section-header app-section-head">
+                        <h3>Access Management</h3>
+                        <small>Add individuals or dynamic groups (Google Docs style).</small>
+                    </div>
+                    <div id="app-access-chip-list" class="access-chip-list"></div>
+                    <div class="access-add-row">
+                        <input type="email" id="app-access-email-input" placeholder="name@example.com" />
+                        <button type="button" class="btn-secondary" id="app-access-add-email-btn">Add email</button>
+                    </div>
+                    <div class="access-group-row">
+                        <button type="button" class="btn-secondary" id="app-access-add-admins-btn">+ All admins group</button>
+                        <select id="app-access-event-select">
+                            <option value="">Select event group…</option>
+                        </select>
+                        <button type="button" class="btn-secondary" id="app-access-add-event-btn">+ Add attendees group</button>
+                    </div>
+                    <small id="app-access-warning" class="hidden"></small>
+                </section>
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary modal-cancel" data-modal="app-modal">Cancel</button>
-                <button class="btn-primary" id="save-app-btn">Save</button>
+                <button class="btn-primary" id="save-app-btn">Create App</button>
             </div>
         </div>
 

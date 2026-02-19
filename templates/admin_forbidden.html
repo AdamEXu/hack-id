@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Forbidden - hack.sv{% endblock %}
+{% block body %}
+<div class="auth-container">
+    <h2>Access denied</h2>
+    <p>You do not have permission to access this admin page.</p>
+    <p><strong>Required permission:</strong> {{ required_page }}.{{ required_access }}</p>
+    <p><a href="/admin">Return to admin dashboard</a></p>
+</div>
+{% endblock %}

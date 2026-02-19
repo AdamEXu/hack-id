@@ -83,6 +83,26 @@ window.addEventListener('popstate', (e) => {
 // Permission metadata (from static/permissions.json) - cached after first load
 let permissionMetadata = { permissions: {}, categories: {} };
 let permissionMetadataLoaded = false;
+let appAccessEntries = [];
+let appEventsCatalog = [];
+let appsCatalog = [];
+let appsPageInitialized = false;
+let appsSearchTerm = '';
+let appsStatusFilter = 'all';
+const APP_TYPE_OAUTH = 'oauth';
+const APP_TYPE_SAML = 'saml';
+const DEFAULT_SAML_BINDING = 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST';
+const DEFAULT_SAML_NAMEID = 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress';
+const DEFAULT_SAML_MAPPING = JSON.stringify([
+    {
+        source_field: 'email',
+        saml_name: 'email',
+        name_format: 'urn:oasis:names:tc:SAML:2.0:attrname-format:basic',
+        required: true,
+        multi_valued: false,
+        transform: 'identity',
+    }
+], null, 2);
 
 async function ensurePermissionMetadata() {
     if (permissionMetadataLoaded) return permissionMetadata;
@@ -225,10 +245,11 @@ async function loadPageContent(pageName) {
 
     // Handle apps page
     if (pageName === 'apps') {
-        if ($.fn.DataTable.isDataTable('#apps-table')) {
-            return; // Already initialized
+        if (!appsPageInitialized) {
+            loadAppsPage();
+        } else {
+            await refreshAppsCatalog();
         }
-        loadAppsPage();
         return;
     }
 
@@ -832,113 +853,197 @@ function loadAdminsPage() {
 function loadAppsPage() {
     const pageElement = document.getElementById('page-apps');
     pageElement.innerHTML = `
-        <div class="page-header">
-            <h1>OAuth 2.0 Apps</h1>
-            <button class="btn-primary" id="add-app-btn">Add App</button>
+        <div class="apps-shell">
+            <div class="apps-toolbar">
+                <div>
+                    <h1>Apps</h1>
+                    <p class="text-muted">Manage app metadata, access controls, and credentials.</p>
+                </div>
+                <button class="btn-primary" id="add-app-btn">New App</button>
+            </div>
+
+            <div class="apps-filters">
+                <input type="text" id="apps-search" placeholder="Search apps by name, client ID, or owner" />
+                <div class="apps-filter-buttons">
+                    <button class="btn-secondary app-filter-btn active" data-filter="all">All</button>
+                    <button class="btn-secondary app-filter-btn" data-filter="active">Active</button>
+                    <button class="btn-secondary app-filter-btn" data-filter="inactive">Inactive</button>
+                </div>
+            </div>
+
+            <div id="apps-list" class="apps-list"></div>
         </div>
-        <table id="apps-table" class="display table-full-width">
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Icon</th>
-                    <th>Client ID</th>
-                    <th>Redirect URIs</th>
-                    <th>Scopes</th>
-                    <th>Created By</th>
-                    <th>Allow Anyone</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-        </table>
     `;
 
     // Add event listener for Add App button
     document.getElementById('add-app-btn').addEventListener('click', showAddAppModal);
-
-    // Initialize DataTable
-    $('#apps-table').DataTable({
-        ajax: {
-            url: '/admin/apps/data',
-            dataSrc: 'data'
-        },
-        columns: [
-            { data: 'name' },
-            {
-                data: 'icon',
-                render: function(data) {
-                    return data || '';
-                }
-            },
-            {
-                data: 'client_id',
-                render: function(data) {
-                    if (!data) return '<span class="text-muted">Legacy</span>';
-                    return `<code class="code-small">${data.substring(0, 20)}...</code>`;
-                }
-            },
-            {
-                data: 'redirect_uris',
-                render: function(data) {
-                    if (!data) return '<span class="text-muted">N/A</span>';
-                    try {
-                        const uris = JSON.parse(data);
-                        if (uris.length === 0) return '<span class="text-muted">None</span>';
-                        if (uris.length === 1) return uris[0];
-                        return `${uris[0]} <span class="text-muted">(+${uris.length - 1} more)</span>`;
-                    } catch {
-                        return data;
-                    }
-                }
-            },
-            {
-                data: 'allowed_scopes',
-                render: function(data) {
-                    if (!data) return '<span class="text-muted">N/A</span>';
-                    try {
-                        const scopes = JSON.parse(data);
-                        return scopes.join(', ');
-                    } catch {
-                        return data;
-                    }
-                }
-            },
-            { data: 'created_by' },
-            {
-                data: 'allow_anyone',
-                render: function(data) {
-                    return data ? '<span class="text-cyan">Yes</span>' : '<span class="text-muted">No</span>';
-                }
-            },
-            {
-                data: 'is_active',
-                render: function(data) {
-                    return data ? '<span class="status-active">Active</span>' : '<span class="status-inactive">Inactive</span>';
-                }
-            },
-            {
-                data: 'id',
-                render: function(data) {
-                    return `
-                        <button class="btn-secondary btn-edit-app" data-app-id="${data}">Edit</button>
-                        <button class="btn-danger btn-delete-app" data-app-id="${data}">Delete</button>
-                    `;
-                }
-            }
-        ],
-        pageLength: 25,
-        order: [[0, 'asc']]
+    document.getElementById('apps-search').addEventListener('input', (event) => {
+        appsSearchTerm = event.target.value.trim().toLowerCase();
+        renderAppsList();
     });
 
-    // Event delegation for dynamically created buttons
-    $('#apps-table').on('click', '.btn-edit-app', function() {
-        const appId = $(this).data('app-id');
-        editApp(appId);
+    document.querySelectorAll('.app-filter-btn').forEach(button => {
+        button.addEventListener('click', () => {
+            appsStatusFilter = button.dataset.filter || 'all';
+            document.querySelectorAll('.app-filter-btn').forEach(btn => btn.classList.remove('active'));
+            button.classList.add('active');
+            renderAppsList();
+        });
     });
 
-    $('#apps-table').on('click', '.btn-delete-app', function() {
-        const appId = $(this).data('app-id');
-        deleteApp(appId);
+    appsPageInitialized = true;
+    refreshAppsCatalog();
+}
+
+function parseJsonList(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) return value;
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+function parseJsonObject(value) {
+    if (!value) return {};
+    if (typeof value === 'object' && !Array.isArray(value)) return value;
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+async function refreshAppsCatalog() {
+    const listElement = document.getElementById('apps-list');
+    if (!listElement) return;
+
+    try {
+        listElement.innerHTML = '<div class="loading">Loading apps...</div>';
+        const response = await secureFetch('/admin/apps/data');
+        if (response.status === 403) {
+            listElement.innerHTML = '<p class="muted">You do not have permission to view apps.</p>';
+            return;
+        }
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to load apps');
+        }
+        appsCatalog = (data.data || []).map(app => ({
+            ...app,
+            redirect_uris_list: parseJsonList(app.redirect_uris),
+            allowed_scopes_list: parseJsonList(app.allowed_scopes),
+            app_type: app.app_type || 'oauth',
+            skip_consent_screen: Boolean(app.skip_consent_screen),
+            saml_sp_signing_certs_list: parseJsonList(app.saml_sp_signing_certs_json || app.saml_sp_signing_certs),
+            saml_attribute_mapping_list: parseJsonList(app.saml_attribute_mapping || app.saml_attribute_mapping_obj),
+            saml_metadata_pending_diff_obj: parseJsonObject(app.saml_metadata_pending_diff_json || app.saml_metadata_pending_diff_obj),
+            saml_enabled: Boolean(app.saml_enabled),
+        }));
+        renderAppsList();
+    } catch (error) {
+        listElement.innerHTML = `<p class="muted">Failed to load apps: ${error.message}</p>`;
+    }
+}
+
+function getFilteredApps() {
+    return appsCatalog.filter(app => {
+        if (appsStatusFilter === 'active' && !app.is_active) return false;
+        if (appsStatusFilter === 'inactive' && app.is_active) return false;
+
+        if (!appsSearchTerm) return true;
+        const haystack = [
+            app.name,
+            app.client_id,
+            app.created_by,
+            app.saml_entity_id,
+            app.saml_acs_url,
+            ...(app.redirect_uris_list || []),
+        ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+        return haystack.includes(appsSearchTerm);
+    });
+}
+
+function appRowBadges(app) {
+    const badges = [];
+    badges.push(app.is_active ? '<span class="app-badge app-badge-active">Active</span>' : '<span class="app-badge app-badge-inactive">Inactive</span>');
+    if (app.app_type === APP_TYPE_SAML) {
+        badges.push('<span class="app-badge app-badge-restricted">Restricted</span>');
+        badges.push(app.saml_enabled ? '<span class="app-badge app-badge-open">SAML Enabled</span>' : '<span class="app-badge app-badge-inactive">SAML Disabled</span>');
+    } else {
+        badges.push(app.allow_anyone ? '<span class="app-badge app-badge-open">All Users</span>' : '<span class="app-badge app-badge-restricted">Restricted</span>');
+    }
+    if (app.app_type === APP_TYPE_OAUTH && app.skip_consent_screen) {
+        badges.push('<span class="app-badge app-badge-internal">Skip Consent</span>');
+    }
+    badges.push(`<span class="app-badge app-badge-type">${app.app_type.toUpperCase()}</span>`);
+    return badges.join('');
+}
+
+function renderAppsList() {
+    const listElement = document.getElementById('apps-list');
+    if (!listElement) return;
+
+    const filteredApps = getFilteredApps();
+    if (!filteredApps.length) {
+        listElement.innerHTML = '<div class="apps-empty">No apps match your filters.</div>';
+        return;
+    }
+
+    listElement.innerHTML = filteredApps.map(app => {
+        const icon = app.icon || '🔗';
+        const isSaml = app.app_type === APP_TYPE_SAML;
+        const scopes = (app.allowed_scopes_list || []).map(scope => `<span class="permission-pill">${scope}</span>`).join('');
+        const redirectPreview = isSaml
+            ? (app.saml_acs_url || 'No ACS URL configured')
+            : (app.redirect_uris_list && app.redirect_uris_list.length ? app.redirect_uris_list[0] : 'No redirect URI configured');
+        const extraRedirects = isSaml ? 0 : Math.max((app.redirect_uris_list || []).length - 1, 0);
+        const extraText = extraRedirects > 0 ? `<span class="text-muted"> +${extraRedirects} more</span>` : '';
+        const descriptor = isSaml
+            ? `<div class="app-scopes-line"><span class="text-muted">Entity:</span> <code>${app.saml_entity_id || 'unconfigured'}</code></div>`
+            : `<div class="app-scopes-line">${scopes || '<span class=\"text-muted\">No scopes</span>'}</div>`;
+
+        return `
+            <div class="app-card" data-app-id="${app.id}">
+                <div class="app-card-main">
+                    <div class="app-card-head">
+                        <div class="app-icon">${icon}</div>
+                        <div class="app-title-wrap">
+                            <h3>${app.name || 'Unnamed App'}</h3>
+                            <div class="app-meta">
+                                <code>${app.client_id || 'legacy-app'}</code>
+                                <span>Owner: ${app.created_by || 'unknown'}</span>
+                            </div>
+                        </div>
+                        <div class="app-badges">${appRowBadges(app)}</div>
+                    </div>
+                    <div class="app-card-body">
+                        <p class="app-redirect">
+                            <span class="text-muted">${isSaml ? 'ACS:' : 'Redirect:'}</span>
+                            <code>${redirectPreview}</code>${extraText}
+                        </p>
+                        ${descriptor}
+                    </div>
+                </div>
+                <div class="app-card-actions">
+                    <button class="btn-secondary app-action-edit" data-app-id="${app.id}">Edit</button>
+                    <button class="btn-danger app-action-delete" data-app-id="${app.id}">Delete</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    listElement.querySelectorAll('.app-action-edit').forEach(button => {
+        button.addEventListener('click', () => editApp(button.dataset.appId));
+    });
+    listElement.querySelectorAll('.app-action-delete').forEach(button => {
+        button.addEventListener('click', () => deleteApp(button.dataset.appId));
     });
 }
 
@@ -1104,6 +1209,79 @@ $(document).ready(function() {
             showToast('Copied', false);
         });
     });
+
+    $('#app-access-add-email-btn').on('click', function() {
+        const input = document.getElementById('app-access-email-input');
+        const email = normalizeEmail(input.value);
+        if (!email) {
+            showToast('Enter an email to add', true);
+            return;
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            showToast('Invalid email address', true);
+            return;
+        }
+        addAccessEntry({
+            principal_type: 'email',
+            principal_ref: email,
+            display_label: email,
+        });
+        input.value = '';
+    });
+    $('#app-access-email-input').on('keydown', function(event) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            $('#app-access-add-email-btn').trigger('click');
+        }
+    });
+
+    $('#app-access-add-admins-btn').on('click', function() {
+        addAccessEntry({
+            principal_type: 'group_admins',
+            principal_ref: 'all_admins',
+            display_label: 'All admins',
+        });
+    });
+
+    $('#app-access-add-event-btn').on('click', function() {
+        const select = document.getElementById('app-access-event-select');
+        const eventId = select.value;
+        if (!eventId) {
+            showToast('Select an event group first', true);
+            return;
+        }
+        const selectedOption = select.options[select.selectedIndex];
+        addAccessEntry({
+            principal_type: 'group_event_attendees',
+            principal_ref: eventId,
+            display_label: `All attendees: ${selectedOption.textContent}`,
+        });
+    });
+
+    $(document).on('click', '#app-access-chip-list button[data-access-index]', function() {
+        const index = parseInt(this.dataset.accessIndex, 10);
+        removeAccessEntryByIndex(index);
+    });
+
+    $('#app-allow-anyone').on('change', function() {
+        renderAppAccessChips();
+    });
+
+    $('#app-type').on('change', function() {
+        applyAppTypeUIState();
+    });
+
+    $('#app-saml-fetch-metadata-btn').on('click', function() {
+        samlMetadataAction('fetch');
+    });
+    $('#app-saml-approve-metadata-btn').on('click', function() {
+        samlMetadataAction('approve');
+    });
+    $('#app-saml-reject-metadata-btn').on('click', function() {
+        samlMetadataAction('reject');
+    });
+
+    applyAppTypeUIState();
 });
 
 function removeAdmin(email) {
@@ -1203,45 +1381,24 @@ function showPermissionsModal(email) {
 
             html += `</div>`;
 
-            // Apps section - fetch apps dynamically
+            // Legacy app permissions section (non-runtime)
             html += `<div class="permission-group">
-                <h3>Apps</h3>
-                <div id="apps-permissions-loading">Loading apps...</div>
+                <h3>Apps (Legacy)</h3>
+                <p class="text-small">Per-admin app permissions are retained for historical visibility only and are not used in runtime app access checks.</p>
+                <div id="legacy-app-permissions"></div>
             </div>`;
 
             content.innerHTML = html;
 
-            // Fetch apps and add to permissions
-            secureFetch('/admin/apps/data')
-                .then(r => r.json())
-                .then(appsData => {
-                    const appsContainer = content.querySelector('#apps-permissions-loading').parentElement;
-                    let appsHtml = '<h3>Apps</h3>';
-
-                    if (appsData.data && appsData.data.length > 0) {
-                        appsData.data.forEach(app => {
-                            appsHtml += `<div class="permission-item">
-                                <label class="permission-label">${app.name}</label>
-                                <div class="permission-access">
-                                    <label><input type="checkbox" class="access-read" data-type="app" data-value="${app.id}"> Read</label>
-                                    <label><input type="checkbox" class="access-write" data-type="app" data-value="${app.id}"> Write</label>
-                                </div>
-                            </div>`;
-                        });
-                    } else {
-                        appsHtml += '<p class="muted">No apps available</p>';
-                    }
-
-                    appsContainer.innerHTML = appsHtml;
-
-                    // Re-check existing permissions after apps are loaded
-                    permissions.forEach(perm => {
-                        const checkbox = content.querySelector(`input[data-type="${perm.permission_type}"][data-value="${perm.permission_value}"].access-${perm.access_level}`);
-                        if (checkbox) {
-                            checkbox.checked = true;
-                        }
-                    });
-                });
+            const legacyAppPerms = permissions.filter(perm => perm.permission_type === 'app');
+            const legacyContainer = content.querySelector('#legacy-app-permissions');
+            if (legacyAppPerms.length === 0) {
+                legacyContainer.innerHTML = '<p class="muted">No legacy app permissions assigned.</p>';
+            } else {
+                legacyContainer.innerHTML = legacyAppPerms
+                    .map(perm => `<span class="permission-pill">${perm.permission_value} (${perm.access_level})</span>`)
+                    .join('');
+            }
 
             // Check existing permissions for events and pages (before apps are loaded)
             permissions.forEach(perm => {
@@ -1289,14 +1446,331 @@ function savePermissions() {
     });
 }
 
+function normalizeEmail(value) {
+    return (value || '').trim().toLowerCase();
+}
+
+function renderAppAccessChips() {
+    const list = document.getElementById('app-access-chip-list');
+    if (!list) return;
+
+    if (!appAccessEntries.length) {
+        list.innerHTML = '<p class="muted">No access principals added.</p>';
+    } else {
+        list.innerHTML = appAccessEntries.map((entry, index) => {
+            const isGroup = entry.principal_type !== 'email';
+            const icon = isGroup ? 'group' : 'person';
+            const label = isGroup ? entry.display_label : entry.principal_ref;
+            const kindClass = isGroup ? 'access-chip-group' : 'access-chip-email';
+            return `
+                <span class="access-chip ${kindClass}">
+                    <span class="material-icons">${icon}</span>
+                    <span>${label}</span>
+                    <button type="button" data-access-index="${index}" aria-label="Remove access principal">&times;</button>
+                </span>
+            `;
+        }).join('');
+    }
+
+    const warning = document.getElementById('app-access-warning');
+    if (!warning) return;
+    const allowAnyone = document.getElementById('app-allow-anyone')?.checked;
+    if (!allowAnyone && appAccessEntries.length === 0) {
+        warning.classList.remove('hidden');
+        warning.textContent = 'Restricted app with empty ACL: only universal-write admins can recover access.';
+    } else {
+        warning.classList.add('hidden');
+        warning.textContent = '';
+    }
+}
+
+function addAccessEntry(entry) {
+    const exists = appAccessEntries.some(existing =>
+        existing.principal_type === entry.principal_type &&
+        existing.principal_ref === entry.principal_ref
+    );
+    if (exists) {
+        showToast('Principal already added', true);
+        return;
+    }
+    appAccessEntries.push(entry);
+    renderAppAccessChips();
+}
+
+function removeAccessEntryByIndex(index) {
+    appAccessEntries = appAccessEntries.filter((_, idx) => idx !== index);
+    renderAppAccessChips();
+}
+
+async function ensureAppEventsCatalog() {
+    if (appEventsCatalog.length) return appEventsCatalog;
+    const response = await secureFetch('/static/events.json');
+    const data = await response.json();
+    appEventsCatalog = Object.entries(data)
+        .filter(([eventId]) => !eventId.startsWith('_'))
+        .map(([eventId, eventData]) => ({
+            id: eventId,
+            name: eventData.name || eventId
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    return appEventsCatalog;
+}
+
+async function populateEventGroupSelect() {
+    const eventSelect = document.getElementById('app-access-event-select');
+    if (!eventSelect) return;
+
+    try {
+        const events = await ensureAppEventsCatalog();
+        eventSelect.innerHTML = '<option value="">Select event group…</option>';
+        events.forEach(eventItem => {
+            const option = document.createElement('option');
+            option.value = eventItem.id;
+            option.textContent = `${eventItem.name} (${eventItem.id})`;
+            eventSelect.appendChild(option);
+        });
+    } catch (error) {
+        showToast('Failed to load event groups', true);
+    }
+}
+
+function getAppAccessPayload() {
+    const seen = new Set();
+    const deduped = [];
+
+    appAccessEntries.forEach((entry) => {
+        const principalType = (entry.principal_type || '').trim();
+        const principalRef = (entry.principal_ref || '').trim();
+        const key = `${principalType}:${principalRef.toLowerCase()}`;
+        if (!principalType || !principalRef || seen.has(key)) {
+            return;
+        }
+        seen.add(key);
+        deduped.push({
+            principal_type: principalType,
+            principal_ref: principalRef,
+        });
+    });
+
+    return deduped;
+}
+
+async function saveAppAccessEntries(appId) {
+    const response = await secureFetch(`/admin/apps/${appId}/access`, {
+        method: 'PUT',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ entries: getAppAccessPayload() }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        const reason = data.reason ? ` (${data.reason})` : '';
+        throw new Error((data.error || 'Failed to save ACL entries') + reason);
+    }
+}
+
+async function loadAppAccessEntries(appId) {
+    const response = await secureFetch(`/admin/apps/${appId}/access`);
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to load app access entries');
+    }
+
+    appAccessEntries = (data.entries || []).map(entry => ({
+        principal_type: entry.principal_type,
+        principal_ref: entry.principal_ref,
+        display_label: entry.display_label || entry.principal_ref,
+    }));
+    renderAppAccessChips();
+}
+
+function getCurrentAppType() {
+    return document.getElementById('app-type')?.value || APP_TYPE_OAUTH;
+}
+
+function applyAppTypeUIState() {
+    const appType = getCurrentAppType();
+    const oauthSections = [
+        document.getElementById('oauth-config-section'),
+        document.getElementById('oauth-scopes-section'),
+    ];
+    const samlSections = [
+        document.getElementById('saml-config-section'),
+        document.getElementById('saml-advanced-section'),
+        document.getElementById('saml-metadata-actions-section'),
+    ];
+
+    oauthSections.forEach(section => section?.classList.toggle('hidden', appType !== APP_TYPE_OAUTH));
+    samlSections.forEach(section => section?.classList.toggle('hidden', appType !== APP_TYPE_SAML));
+
+    const allowAnyone = document.getElementById('app-allow-anyone');
+    const skipConsent = document.getElementById('app-skip-consent');
+    if (appType === APP_TYPE_SAML) {
+        if (allowAnyone) allowAnyone.checked = false;
+        if (skipConsent) skipConsent.checked = false;
+        if (allowAnyone) allowAnyone.disabled = true;
+        if (skipConsent) skipConsent.disabled = true;
+    } else {
+        if (allowAnyone) allowAnyone.disabled = false;
+        if (skipConsent) skipConsent.disabled = false;
+    }
+
+    const credentials = document.getElementById('app-credentials');
+    if (appType === APP_TYPE_SAML) {
+        credentials?.classList.add('hidden');
+    }
+
+    renderAppAccessChips();
+}
+
+function setDefaultSamlFields() {
+    document.getElementById('app-saml-metadata-url').value = '';
+    document.getElementById('app-saml-entity-id').value = '';
+    document.getElementById('app-saml-acs-url').value = '';
+    document.getElementById('app-saml-acs-binding').value = DEFAULT_SAML_BINDING;
+    document.getElementById('app-saml-slo-url').value = '';
+    document.getElementById('app-saml-nameid-format').value = DEFAULT_SAML_NAMEID;
+    document.getElementById('app-saml-attribute-mapping').value = DEFAULT_SAML_MAPPING;
+    document.getElementById('app-saml-signing-certs').value = '[]';
+    document.getElementById('app-saml-require-signed-request').checked = false;
+    document.getElementById('app-saml-enabled').checked = false;
+    const status = document.getElementById('app-saml-sync-status');
+    if (status) status.textContent = 'No sync activity yet.';
+    const audit = document.getElementById('app-saml-audit-log');
+    if (audit) audit.innerHTML = '';
+}
+
+function setSamlFieldsFromApp(app) {
+    document.getElementById('app-saml-metadata-url').value = app.saml_metadata_url || '';
+    document.getElementById('app-saml-entity-id').value = app.saml_entity_id || '';
+    document.getElementById('app-saml-acs-url').value = app.saml_acs_url || '';
+    document.getElementById('app-saml-acs-binding').value = app.saml_acs_binding || DEFAULT_SAML_BINDING;
+    document.getElementById('app-saml-slo-url').value = app.saml_slo_url || '';
+    document.getElementById('app-saml-nameid-format').value = app.saml_nameid_format || DEFAULT_SAML_NAMEID;
+    document.getElementById('app-saml-attribute-mapping').value = app.saml_attribute_mapping
+        ? (typeof app.saml_attribute_mapping === 'string' ? app.saml_attribute_mapping : JSON.stringify(app.saml_attribute_mapping, null, 2))
+        : DEFAULT_SAML_MAPPING;
+    document.getElementById('app-saml-signing-certs').value = JSON.stringify(app.saml_sp_signing_certs_list || [], null, 2);
+    document.getElementById('app-saml-require-signed-request').checked = Boolean(app.saml_require_signed_authn_request);
+    document.getElementById('app-saml-enabled').checked = Boolean(app.saml_enabled);
+}
+
+function samlPayloadFromForm() {
+    return {
+        saml_metadata_url: document.getElementById('app-saml-metadata-url').value.trim(),
+        saml_entity_id: document.getElementById('app-saml-entity-id').value.trim(),
+        saml_acs_url: document.getElementById('app-saml-acs-url').value.trim(),
+        saml_acs_binding: document.getElementById('app-saml-acs-binding').value.trim() || DEFAULT_SAML_BINDING,
+        saml_slo_url: document.getElementById('app-saml-slo-url').value.trim(),
+        saml_nameid_format: document.getElementById('app-saml-nameid-format').value.trim() || DEFAULT_SAML_NAMEID,
+        saml_attribute_mapping: document.getElementById('app-saml-attribute-mapping').value.trim(),
+        saml_sp_signing_certs_json: document.getElementById('app-saml-signing-certs').value.trim(),
+        saml_require_signed_authn_request: document.getElementById('app-saml-require-signed-request').checked,
+        saml_enabled: document.getElementById('app-saml-enabled').checked,
+    };
+}
+
+async function loadSamlSyncStatus(appId) {
+    const statusEl = document.getElementById('app-saml-sync-status');
+    const auditEl = document.getElementById('app-saml-audit-log');
+    if (!statusEl || !auditEl) return;
+
+    try {
+        const [statusResp, auditResp] = await Promise.all([
+            secureFetch(`/admin/apps/${appId}/saml/sync-status`),
+            secureFetch(`/admin/apps/${appId}/saml/audit?limit=20`),
+        ]);
+
+        const statusData = await statusResp.json();
+        const auditData = await auditResp.json();
+
+        if (statusData.success) {
+            const syncStatus = statusData.status || {};
+            const parts = [
+                `Fetched: ${syncStatus.last_fetched_at || 'never'}`,
+                `Applied: ${syncStatus.last_applied_at || 'never'}`,
+            ];
+            if (syncStatus.sync_error) parts.push(`Error: ${syncStatus.sync_error}`);
+            if (syncStatus.pending_diff && Object.keys(syncStatus.pending_diff).length) {
+                parts.push('Pending staged metadata changes');
+            }
+            statusEl.textContent = parts.join(' | ');
+        } else {
+            statusEl.textContent = statusData.error || 'Failed to load sync status';
+        }
+
+        if (auditData.success) {
+            const events = auditData.events || [];
+            if (!events.length) {
+                auditEl.innerHTML = '<p class=\"muted\">No SAML audit events yet.</p>';
+            } else {
+                auditEl.innerHTML = events.map(event => {
+                    const time = event.created_at ? new Date(event.created_at * 1000).toLocaleString() : '';
+                    return `<div class=\"log-row\"><div><strong>${event.event_type}</strong> (${event.outcome})</div><div class=\"meta\">${time} ${event.reason ? `- ${event.reason}` : ''}</div></div>`;
+                }).join('');
+            }
+        } else {
+            auditEl.innerHTML = `<p class=\"muted\">${auditData.error || 'Failed to load SAML audit log'}</p>`;
+        }
+    } catch (error) {
+        statusEl.textContent = `Failed to load SAML sync status: ${error.message}`;
+    }
+}
+
+async function samlMetadataAction(action) {
+    const appId = document.getElementById('app-id').value;
+    if (!appId) {
+        showToast('Save the app before running metadata actions', true);
+        return;
+    }
+    const actionPath = {
+        fetch: 'fetch-metadata',
+        approve: 'approve-metadata',
+        reject: 'reject-metadata',
+    }[action];
+    if (!actionPath) return;
+
+    const body = action === 'fetch'
+        ? JSON.stringify({ saml_metadata_url: document.getElementById('app-saml-metadata-url').value.trim() })
+        : '{}';
+
+    try {
+        const response = await secureFetch(`/admin/apps/${appId}/saml/${actionPath}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+        });
+        const data = await response.json();
+        if (!data.success) {
+            showToast(data.error || `Failed to ${action} metadata`, true);
+            return;
+        }
+        showToast(`Metadata ${action} succeeded`);
+        await loadSamlSyncStatus(appId);
+    } catch (error) {
+        showToast(`Metadata ${action} failed: ${error.message}`, true);
+    }
+}
+
 function showAddAppModal() {
-    document.getElementById('app-modal-title').textContent = 'Add OAuth 2.0 App';
+    document.getElementById('app-modal-title').textContent = 'Add App';
+    const subtitle = document.querySelector('#app-modal .app-modal-subtitle');
+    if (subtitle) subtitle.textContent = 'Create OAuth or SAML apps and define launch access before publishing.';
+    const saveButton = document.getElementById('save-app-btn');
+    if (saveButton) saveButton.textContent = 'Create App';
     document.getElementById('app-id').value = '';
+    document.getElementById('app-type').value = APP_TYPE_OAUTH;
     document.getElementById('app-name').value = '';
     document.getElementById('app-icon').value = '';
     document.getElementById('app-redirect-uris').value = '';
     document.getElementById('app-allow-anyone').checked = false;
     document.getElementById('app-skip-consent').checked = false;
+    setDefaultSamlFields();
+    document.getElementById('app-access-email-input').value = '';
+    appAccessEntries = [];
+    renderAppAccessChips();
+    populateEventGroupSelect();
 
     // Hide credentials section for new apps
     const credentials = document.getElementById('app-credentials');
@@ -1304,148 +1778,166 @@ function showAddAppModal() {
 
     // Load scopes
     loadAppScopes([]);
+    applyAppTypeUIState();
 
     openModal('app-modal');
 }
 
 function editApp(appId) {
-    // Fetch app details
-    secureFetch(`/admin/apps/data`)
-        .then(r => {
-            if (r.status === 403) {
-                showToast('You don\'t have permission to edit apps', true);
-                throw new Error('Permission denied');
+    const app = appsCatalog.find(a => a.id === appId);
+    if (!app) {
+        showToast('App not found. Refreshing list...', true);
+        refreshAppsCatalog();
+        return;
+    }
+
+    document.getElementById('app-modal-title').textContent = 'Edit App';
+    const subtitle = document.querySelector('#app-modal .app-modal-subtitle');
+    if (subtitle) subtitle.textContent = 'Update app configuration, metadata, and access policy.';
+    const saveButton = document.getElementById('save-app-btn');
+    if (saveButton) saveButton.textContent = 'Save Changes';
+    document.getElementById('app-id').value = app.id;
+    document.getElementById('app-type').value = app.app_type || APP_TYPE_OAUTH;
+    document.getElementById('app-name').value = app.name;
+    document.getElementById('app-icon').value = app.icon || '';
+    document.getElementById('app-redirect-uris').value = (app.redirect_uris_list || []).join('\n');
+    document.getElementById('app-allow-anyone').checked = app.allow_anyone;
+    document.getElementById('app-skip-consent').checked = app.skip_consent_screen || false;
+    document.getElementById('app-access-email-input').value = '';
+    setSamlFieldsFromApp(app);
+    applyAppTypeUIState();
+
+    const credentials = document.getElementById('app-credentials');
+    if (app.client_id && app.app_type !== APP_TYPE_SAML) {
+        credentials.classList.remove('hidden');
+        document.getElementById('app-client-id').value = app.client_id;
+        document.getElementById('app-client-secret').value = app.client_secret || '';
+        document.getElementById('app-client-secret').type = 'password';
+    } else {
+        credentials.classList.add('hidden');
+    }
+
+    loadAppScopes(app.allowed_scopes_list || []);
+    populateEventGroupSelect()
+        .then(() => loadAppAccessEntries(app.id))
+        .then(async () => {
+            if (app.app_type === APP_TYPE_SAML) {
+                await loadSamlSyncStatus(app.id);
             }
-            return r.json();
-        })
-        .then(data => {
-            const app = data.data.find(a => a.id === appId);
-            if (!app) {
-                showToast('App not found', true);
-                return;
-            }
-
-            document.getElementById('app-modal-title').textContent = 'Edit OAuth 2.0 App';
-            document.getElementById('app-id').value = app.id;
-            document.getElementById('app-name').value = app.name;
-            document.getElementById('app-icon').value = app.icon || '';
-
-            // Handle redirect URIs
-            if (app.redirect_uris) {
-                try {
-                    const uris = JSON.parse(app.redirect_uris);
-                    document.getElementById('app-redirect-uris').value = uris.join('\n');
-                } catch {
-                    document.getElementById('app-redirect-uris').value = '';
-                }
-            } else {
-                document.getElementById('app-redirect-uris').value = '';
-            }
-
-            document.getElementById('app-allow-anyone').checked = app.allow_anyone;
-            document.getElementById('app-skip-consent').checked = app.skip_consent_screen || false;
-
-            // Show credentials if they exist
-            const credentials = document.getElementById('app-credentials');
-            if (app.client_id) {
-                credentials.classList.remove('hidden');
-                document.getElementById('app-client-id').value = app.client_id;
-                document.getElementById('app-client-secret').value = app.client_secret || '';
-                document.getElementById('app-client-secret').type = 'password';
-            } else {
-                credentials.classList.add('hidden');
-            }
-
-            // Load scopes
-            const scopes = app.allowed_scopes ? JSON.parse(app.allowed_scopes) : [];
-            loadAppScopes(scopes);
-
             openModal('app-modal');
         })
-        .catch(error => {
-            // Session expired and permission denied errors already shown
-            if (error.message !== 'Session expired' &&
-                error.message !== 'CSRF token is missing' &&
-                error.message !== 'Permission denied') {
-                showToast('Failed to load app details: ' + error.message, true);
-            }
+        .catch((error) => {
+            showToast(`Failed to load app access: ${error.message}`, true);
         });
 }
 
-function saveApp() {
+async function saveApp() {
     const appId = document.getElementById('app-id').value;
+    const appType = getCurrentAppType();
     const name = document.getElementById('app-name').value.trim();
     const icon = document.getElementById('app-icon').value.trim();
     const redirectUrisText = document.getElementById('app-redirect-uris').value.trim();
-    const allowAnyone = document.getElementById('app-allow-anyone').checked;
-    const skipConsent = document.getElementById('app-skip-consent').checked;
+    const allowAnyone = appType === APP_TYPE_SAML ? false : document.getElementById('app-allow-anyone').checked;
+    const skipConsent = appType === APP_TYPE_SAML ? false : document.getElementById('app-skip-consent').checked;
 
     if (!name) {
         showToast('Name is required', true);
         return;
     }
 
-    // Parse redirect URIs
+    // Parse redirect URIs (OAuth only)
     const redirectUris = redirectUrisText.split('\n').map(uri => uri.trim()).filter(uri => uri.length > 0);
-    if (redirectUris.length === 0) {
+    if (appType === APP_TYPE_OAUTH && redirectUris.length === 0) {
         showToast('At least one redirect URI is required', true);
         return;
     }
 
-    // Get selected scopes
+    // Get selected scopes (OAuth only)
     const selectedScopes = [];
     document.querySelectorAll('#app-scopes input[type="checkbox"]:checked').forEach(cb => {
         selectedScopes.push(cb.value);
     });
 
-    if (selectedScopes.length === 0) {
+    if (appType === APP_TYPE_OAUTH && selectedScopes.length === 0) {
         showToast('At least one scope is required', true);
         return;
     }
 
-    const method = appId ? 'PUT' : 'POST';
-    const url = appId ? `/admin/apps/${appId}` : '/admin/apps';
-
-    secureFetch(url, {
-        method,
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            name,
-            icon,
-            redirect_uris: redirectUris,
-            allowed_scopes: selectedScopes,
-            allow_anyone: allowAnyone,
-            skip_consent_screen: skipConsent
-        })
-    })
-    .then(r => {
-        if (r.status === 403) {
-            showToast('You don\'t have permission to ' + (appId ? 'edit' : 'create') + ' apps', true);
-            throw new Error('Permission denied');
+    const samlPayload = appType === APP_TYPE_SAML ? samlPayloadFromForm() : {};
+    if (appType === APP_TYPE_SAML) {
+        if (samlPayload.saml_enabled && (!samlPayload.saml_entity_id || !samlPayload.saml_acs_url)) {
+            showToast('Entity ID and ACS URL are required when SAML is enabled', true);
+            return;
         }
-        return r.json();
-    })
-    .then(data => {
-        if (data.success) {
-            showToast(appId ? 'App updated successfully' : 'App created successfully');
-            closeModal('app-modal');
-            if ($.fn.DataTable.isDataTable('#apps-table')) {
-                $('#apps-table').DataTable().ajax.reload();
+        if (samlPayload.saml_attribute_mapping) {
+            try {
+                JSON.parse(samlPayload.saml_attribute_mapping);
+            } catch {
+                showToast('SAML attribute mapping must be valid JSON', true);
+                return;
             }
-        } else {
-            showToast(data.error || 'Failed to save app', true);
         }
-    })
-    .catch(error => {
+        if (samlPayload.saml_sp_signing_certs_json) {
+            try {
+                const certsParsed = JSON.parse(samlPayload.saml_sp_signing_certs_json);
+                if (!Array.isArray(certsParsed)) {
+                    showToast('SP signing certs must be a JSON array', true);
+                    return;
+                }
+            } catch {
+                showToast('SP signing certs must be valid JSON', true);
+                return;
+            }
+        }
+    }
+
+    try {
+        const method = appId ? 'PUT' : 'POST';
+        const url = appId ? `/admin/apps/${appId}` : '/admin/apps';
+
+        const appResponse = await secureFetch(url, {
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                name,
+                icon,
+                app_type: appType,
+                ...(appType === APP_TYPE_OAUTH ? {
+                    redirect_uris: redirectUris,
+                    allowed_scopes: selectedScopes,
+                } : {}),
+                allow_anyone: allowAnyone,
+                skip_consent_screen: skipConsent,
+                ...samlPayload,
+            })
+        });
+        if (appResponse.status === 403) {
+            showToast(`You don't have permission to ${appId ? 'edit' : 'create'} apps`, true);
+            return;
+        }
+
+        const appData = await appResponse.json();
+        if (!appData.success) {
+            showToast(appData.error || 'Failed to save app', true);
+            return;
+        }
+
+        const targetAppId = appId || appData.app_id;
+        await saveAppAccessEntries(targetAppId);
+
+        showToast(appId ? 'App updated successfully' : 'App created successfully');
+        closeModal('app-modal');
+        await refreshAppsCatalog();
+    } catch (error) {
         // Session expired and permission denied errors already shown
         if (error.message !== 'Session expired' &&
             error.message !== 'CSRF token is missing' &&
             error.message !== 'Permission denied') {
             showToast('Failed to save app: ' + error.message, true);
         }
-    });
+    }
 }
 
 function deleteApp(appId) {
@@ -1464,7 +1956,7 @@ function deleteApp(appId) {
     .then(data => {
         if (data.success) {
             showToast('App deleted successfully');
-            $('#apps-table').DataTable().ajax.reload();
+            refreshAppsCatalog();
         } else {
             showToast(data.error || 'Failed to delete app', true);
         }
@@ -1492,20 +1984,28 @@ function loadAppScopes(selectedScopes = []) {
                 const isRequired = scope.required;
 
                 const scopeDiv = document.createElement('div');
-                scopeDiv.className = 'permission-item';
+                scopeDiv.className = 'scope-card';
                 scopeDiv.innerHTML = `
-                    <label style="display: flex; align-items: center; cursor: pointer;">
+                    <label>
                         <input type="checkbox"
                                value="${scope.name}"
                                ${isChecked ? 'checked' : ''}
-                               ${isRequired ? 'disabled checked' : ''}
-                               style="margin-right: 10px;">
+                               ${isRequired ? 'disabled checked' : ''}>
                         <div>
-                            <strong>${scope.name}</strong>
-                            <div style="font-size: 0.85em; color: #888;">${scope.description}</div>
+                            <strong>${scope.name}${isRequired ? '<span class="scope-required-pill">Required</span>' : ''}</strong>
+                            <small>${scope.description}</small>
                         </div>
                     </label>
                 `;
+                const checkbox = scopeDiv.querySelector('input[type="checkbox"]');
+                if (checkbox?.checked) {
+                    scopeDiv.classList.add('scope-card-selected');
+                }
+                if (checkbox) {
+                    checkbox.addEventListener('change', () => {
+                        scopeDiv.classList.toggle('scope-card-selected', checkbox.checked);
+                    });
+                }
                 scopesContainer.appendChild(scopeDiv);
             });
         })

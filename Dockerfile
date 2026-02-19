@@ -14,6 +14,11 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     gcc \
+    xmlsec1 \
+    libxmlsec1-dev \
+    libxmlsec1-openssl \
+    pkg-config \
+    cron \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -40,4 +45,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Use entrypoint script to initialize DB before starting Gunicorn
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-

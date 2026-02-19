@@ -5,6 +5,13 @@ import html
 from typing import Any, Dict, List, Optional, Union
 
 
+def normalize_email(email: str) -> str:
+    """Normalize email with lowercase + trim only."""
+    if not isinstance(email, str):
+        return ""
+    return email.strip().lower()
+
+
 def sanitize_string(value: str, max_length: int = 255) -> str:
     """Sanitize string input by escaping HTML and limiting length."""
     if not isinstance(value, str):
@@ -27,7 +34,7 @@ def validate_email(email: str) -> bool:
     
     # Basic email regex pattern
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email.strip().lower()))
+    return bool(re.match(pattern, normalize_email(email)))
 
 
 def validate_discord_id(discord_id: str) -> bool:
