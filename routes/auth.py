@@ -43,6 +43,9 @@ def index():
         from models.admin import is_admin
         from services.dashboard_service import get_user_dashboard_data
 
+        if session.get("saml_pending_flow"):
+            return redirect("/saml/continue")
+
         user_is_admin = is_admin(session["user_email"])
         dashboard_data = get_user_dashboard_data(session["user_email"])
 
@@ -109,6 +112,10 @@ def auth_google_callback():
     if "verification_token" in session:
         return redirect(url_for("auth.verify_complete"))
 
+    # Continue deferred SAML flow when present.
+    if session.get("saml_pending_flow"):
+        return redirect("/saml/continue")
+
     # Check if this is part of OAuth 2.0 authorization code flow
     if "oauth2_client_id" in session:
         # Redirect back to /oauth/authorize to continue the flow
@@ -163,6 +170,12 @@ def oauth_authorize():
             "auth.html",
             state="error",
             error="Invalid client_id. This app is not registered."
+        )
+    if app.get("app_type", "oauth") != "oauth":
+        return render_template(
+            "auth.html",
+            state="error",
+            error="This app is not configured for OAuth.",
         )
 
     if not app.get('is_active'):
@@ -276,7 +289,7 @@ def oauth_authorize_consent():
 
     # Get app by client_id and verify it's still active
     app = get_app_by_client_id(client_id)
-    if not app or not app.get('is_active'):
+    if not app or not app.get('is_active') or app.get("app_type", "oauth") != "oauth":
         # Clear OAuth session
         session.pop("oauth2_client_id", None)
         session.pop("oauth2_redirect_uri", None)
@@ -502,6 +515,9 @@ def email_callback():
         write_universal_admin_snapshot(email, session)
 
         # Check if this is part of OAuth 2.0 authorization code flow
+        if session.get("saml_pending_flow") and user.get("legal_name"):
+            return redirect("/saml/continue")
+
         if "oauth2_client_id" in session and user.get("legal_name"):
             # Redirect back to /oauth/authorize to continue the flow
             # The OAuth parameters are already in the session
@@ -704,6 +720,9 @@ def register():
     # Check if this is part of Discord verification flow
     if "verification_token" in session:
         return redirect(url_for("auth.verify_complete"))
+
+    if session.get("saml_pending_flow"):
+        return redirect("/saml/continue")
 
     # Check if this is part of NEW OAuth 2.0 flow (authorization code flow)
     if "oauth2_client_id" in session:

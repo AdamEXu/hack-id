@@ -12,3 +12,7 @@ scrapyard-checkin.tsv
 .metabob/
 .claude/
 flask_session/
+secrets/
+.pytest_cache/
+saml_idp_key_active.pem
+saml_idp_cert_active.pem

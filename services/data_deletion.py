@@ -10,6 +10,11 @@ from services.app_access_service import (
     delete_acl_entries_for_email,
     count_acl_entries_for_email,
 )
+from services.saml_audit_service import (
+    anonymize_saml_audit_email,
+    count_saml_artifacts_for_email,
+    delete_saml_sp_sessions_for_email,
+)
 from utils.validation import normalize_email
 
 # Configure logging
@@ -31,6 +36,8 @@ def get_user_data_summary(user_email: str) -> Dict[str, Any]:
         "event_registrations": 0,
         "api_usage_logs": 0,
         "opt_out_tokens": 0,
+        "saml_sp_sessions": 0,
+        "saml_audit_events": 0,
     }
 
     # Check if user exists
@@ -56,6 +63,22 @@ def get_user_data_summary(user_email: str) -> Dict[str, Any]:
     if opt_tokens and opt_tokens["count"] > 0:
         summary["opt_out_tokens"] = opt_tokens["count"]
         summary["tables_with_data"].append("opt_out_tokens")
+
+    saml_sessions = conn.execute(
+        "SELECT COUNT(*) as count FROM saml_sp_sessions WHERE user_email = ?",
+        (user_email,),
+    ).fetchone()
+    if saml_sessions and saml_sessions["count"] > 0:
+        summary["saml_sp_sessions"] = saml_sessions["count"]
+        summary["tables_with_data"].append("saml_sp_sessions")
+
+    saml_audit = conn.execute(
+        "SELECT COUNT(*) as count FROM saml_audit_events WHERE user_email = ?",
+        (user_email,),
+    ).fetchone()
+    if saml_audit and saml_audit["count"] > 0:
+        summary["saml_audit_events"] = saml_audit["count"]
+        summary["tables_with_data"].append("saml_audit_events")
 
     conn.close()
     return summary
@@ -218,6 +241,18 @@ def delete_user_data(user_email: str, include_discord: bool = True, include_list
                 f"Deleted {acl_deleted} ACL records from app_access_entries for {normalized_email}"
             )
 
+        # Delete SAML SP sessions and anonymize SAML audit references.
+        saml_sessions_deleted = delete_saml_sp_sessions_for_email(normalized_email)
+        if saml_sessions_deleted > 0:
+            result["deleted_from_tables"].append("saml_sp_sessions")
+            result["deletion_counts"]["saml_sp_sessions"] = saml_sessions_deleted
+            total_deleted += saml_sessions_deleted
+
+        saml_audit_anonymized = anonymize_saml_audit_email(normalized_email)
+        if saml_audit_anonymized > 0:
+            result["deleted_from_tables"].append("saml_audit_events")
+            result["deletion_counts"]["saml_audit_events"] = saml_audit_anonymized
+
         # Delete from Teable (persistent data)
         try:
             from models.user import delete_user
@@ -313,6 +348,17 @@ def verify_user_deletion(user_email: str) -> Dict[str, Any]:
             verification["remaining_data"]["app_access_entries"] = acl_count
     except Exception as e:
         logger.error(f"Error checking app_access_entries during verification: {e}")
+
+    # Check SAML-linked artifacts (SQLite)
+    try:
+        saml_counts = count_saml_artifacts_for_email(normalized_email)
+        verification["tables_checked"].extend(["saml_audit_events", "saml_sp_sessions"])
+        for table_name, count in saml_counts.items():
+            if count > 0:
+                verification["completely_deleted"] = False
+                verification["remaining_data"][table_name] = count
+    except Exception as e:
+        logger.error(f"Error checking SAML artifacts during verification: {e}")
 
     return verification
 

@@ -312,17 +312,44 @@ def delete_record(table_name: str, record_id: str) -> bool:
     if not table_id:
         raise ValueError(f"Unknown table: {table_name}")
 
+    headers = get_headers()
+    delete_by_id_url = f"{TEABLE_API_URL}/table/{table_id}/record/{record_id}"
+
+    # Preferred single-record endpoint.
+    try:
+        response = requests.delete(delete_by_id_url, headers=headers, timeout=10)
+        if response.status_code in (200, 204):
+            return True
+        # Deleting an already-missing record is idempotent success.
+        if response.status_code == 404:
+            return True
+    except requests.RequestException:
+        pass
+
+    # Backward-compatible fallback to query-array style.
     url = f"{TEABLE_API_URL}/table/{table_id}/record"
-    params = {'recordIds': record_id}
+    try:
+        response = requests.delete(
+            url,
+            headers=headers,
+            params=[("recordIds[]", record_id)],
+            timeout=10,
+        )
+        if response.status_code in (200, 204, 404):
+            return True
+    except requests.RequestException:
+        pass
 
-    response = requests.delete(url, headers=get_headers(), params=params)
-
-    return response.status_code == 200
+    return False
 
 
 def delete_records_batch(table_name: str, record_ids: List[str]) -> bool:
-    """Delete multiple records in one call."""
-    if not record_ids:
+    """Delete multiple records in one call, with compatibility fallbacks."""
+    normalized_ids = [str(record_id).strip() for record_id in record_ids if str(record_id).strip()]
+    # Preserve order but remove duplicates.
+    normalized_ids = list(dict.fromkeys(normalized_ids))
+
+    if not normalized_ids:
         return True
 
     table_id = TEABLE_TABLE_IDS.get(table_name)
@@ -330,9 +357,82 @@ def delete_records_batch(table_name: str, record_ids: List[str]) -> bool:
         raise ValueError(f"Unknown table: {table_name}")
 
     url = f"{TEABLE_API_URL}/table/{table_id}/record"
-    params = {'recordIds': ','.join(record_ids)}
-    response = requests.delete(url, headers=get_headers(), params=params)
-    return response.status_code == 200
+    headers = get_headers()
+
+    # Strategy 1: query-array style (documented).
+    try:
+        array_params = [("recordIds[]", record_id) for record_id in normalized_ids]
+        response = requests.delete(
+            url,
+            headers=headers,
+            params=array_params,
+            timeout=10,
+        )
+        if response.status_code in (200, 204):
+            return True
+        # Teable can return 404 when some IDs are already deleted.
+        if response.status_code == 404:
+            return True
+    except requests.RequestException:
+        pass
+
+    # Strategy 2: comma-separated query param.
+    try:
+        response = requests.delete(
+            url,
+            headers=headers,
+            params={"recordIds": ",".join(normalized_ids)},
+            timeout=10,
+        )
+        if response.status_code in (200, 204):
+            return True
+        if response.status_code == 404:
+            return True
+    except requests.RequestException:
+        pass
+
+    # Strategy 3: repeated query params.
+    try:
+        repeated_params = [("recordIds", record_id) for record_id in normalized_ids]
+        response = requests.delete(
+            url,
+            headers=headers,
+            params=repeated_params,
+            timeout=10,
+        )
+        if response.status_code in (200, 204):
+            return True
+        if response.status_code == 404:
+            return True
+    except requests.RequestException:
+        pass
+
+    # Strategy 4: JSON body with recordIds array.
+    try:
+        response = requests.delete(
+            url,
+            headers=headers,
+            json={"recordIds": normalized_ids},
+            timeout=10,
+        )
+        if response.status_code in (200, 204):
+            return True
+        if response.status_code == 404:
+            return True
+    except requests.RequestException:
+        pass
+
+    # Strategy 5: per-record fallback to maximize successful cleanup.
+    all_deleted = True
+    for record_id in normalized_ids:
+        if not delete_record(table_name, record_id):
+            all_deleted = False
+
+    if not all_deleted:
+        print(f"❌ Failed to delete one or more records in {table_name}")
+        print(f"   Record IDs: {normalized_ids}")
+
+    return all_deleted
 
 
 def find_record_by_field(table_name: str, field_name: str, value: Any) -> Optional[Dict[str, Any]]:
