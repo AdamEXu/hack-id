@@ -57,6 +57,7 @@ pydantic_core==2.33.2
 Pygments==2.19.2
 PyJWT==2.10.1
 pyparsing==3.2.3
+pyOpenSSL==25.3.0
 python-dotenv==1.0.0
 pysaml2==7.5.2
 pytz==2025.2
