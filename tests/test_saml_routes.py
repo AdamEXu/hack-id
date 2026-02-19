@@ -7,6 +7,7 @@ os.environ.setdefault("WORKOS_API_KEY", "test-workos-key")
 os.environ.setdefault("WORKOS_CLIENT_ID", "test-workos-client")
 
 import app as app_module  # noqa: E402
+from routes import saml as saml_routes  # noqa: E402
 
 
 def _admin_session(client):
@@ -94,3 +95,39 @@ def test_admin_rejects_saml_fields_for_oauth_app(client):
     payload = response.get_json()
     assert payload["success"] is False
     assert "cannot include SAML fields" in payload["error"]
+
+
+def test_saml_launch_same_site_accepts_base_url_origin(monkeypatch):
+    monkeypatch.setattr(saml_routes, "BASE_URL", "https://id.hack.sv")
+
+    with app_module.app.test_request_context(
+        "/saml/apps/recdQ9A46ledCePmMlQ/launch",
+        method="POST",
+        base_url="http://internal:3000",
+        headers={"Origin": "https://id.hack.sv"},
+    ):
+        assert saml_routes._same_site_request() is True
+
+
+def test_saml_launch_same_site_accepts_forwarded_origin():
+    with app_module.app.test_request_context(
+        "/saml/apps/recdQ9A46ledCePmMlQ/launch",
+        method="POST",
+        base_url="http://internal:3000",
+        headers={
+            "Origin": "https://id.hack.sv",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "id.hack.sv",
+        },
+    ):
+        assert saml_routes._same_site_request() is True
+
+
+def test_saml_launch_same_site_rejects_cross_origin():
+    with app_module.app.test_request_context(
+        "/saml/apps/recdQ9A46ledCePmMlQ/launch",
+        method="POST",
+        base_url="https://id.hack.sv",
+        headers={"Origin": "https://evil.example"},
+    ):
+        assert saml_routes._same_site_request() is False

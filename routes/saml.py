@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from flask import Blueprint, Response, g, redirect, render_template, request, session
 
+from config import BASE_URL
 from models.app import APP_TYPE_SAML, get_app_by_id
 from services.app_access_service import evaluate_app_acl_with_fail_open
 from services.saml_audit_service import log_saml_event
@@ -72,14 +73,35 @@ def _set_pending_saml_state(
 
 
 def _same_site_request() -> bool:
-    origin = (request.headers.get("Origin") or "").strip()
-    referer = (request.headers.get("Referer") or "").strip()
-    host_url = request.host_url.rstrip("/")
+    def _normalize_origin(value: str) -> str:
+        parsed = urlparse((value or "").strip())
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        return ""
+
+    origin = _normalize_origin(request.headers.get("Origin", ""))
+    referer = _normalize_origin(request.headers.get("Referer", ""))
+    allowed_origins = {
+        candidate
+        for candidate in {
+            _normalize_origin(request.host_url),
+            _normalize_origin(request.url_root),
+            _normalize_origin(BASE_URL),
+        }
+        if candidate
+    }
+
+    forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+    forwarded_host = (request.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+    if forwarded_proto and forwarded_host:
+        forwarded_origin = _normalize_origin(f"{forwarded_proto}://{forwarded_host}")
+        if forwarded_origin:
+            allowed_origins.add(forwarded_origin)
 
     if origin:
-        return origin.rstrip("/") == host_url
+        return origin in allowed_origins
     if referer:
-        return referer.startswith(host_url)
+        return referer in allowed_origins
     return False
 
 
