@@ -161,11 +161,13 @@ def start_cleanup_thread():
     """Start a background thread to clean up old rate limiting entries."""
     import threading
     import time
+    from utils.db_init import cleanup_expired_records
 
     def cleanup_worker():
         while True:
             time.sleep(300)  # Clean up every 5 minutes
             cleanup_rate_limiter()
+            cleanup_expired_records()
 
     cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
     cleanup_thread.start()

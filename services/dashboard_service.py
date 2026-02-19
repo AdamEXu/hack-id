@@ -1,10 +1,15 @@
 """Dashboard service for user profile and event information."""
 
 import json
+import logging
 from typing import Dict, List, Any, Optional
+from models.app import APP_TYPE_SAML, get_all_apps
 from models.user import get_user_by_email
+from services.app_access_service import AppAclEvaluationError, evaluate_app_acl_strict
 from utils.events import get_all_events, get_current_event
 from utils.discord import get_discord_user_info
+
+logger = logging.getLogger(__name__)
 
 
 def get_user_dashboard_data(user_email: str) -> Dict[str, Any]:
@@ -17,6 +22,7 @@ def get_user_dashboard_data(user_email: str) -> Dict[str, Any]:
     dashboard_data = {
         "user": None,
         "enrolled_events": [],
+        "saml_apps": [],
         "discord": {
             "linked": False,
             "username": None,
@@ -93,7 +99,47 @@ def get_user_dashboard_data(user_email: str) -> Dict[str, Any]:
         except Exception as e:
             dashboard_data["discord"]["error"] = f"Discord API error: {str(e)}"
 
+    # Discover launchable SAML apps using strict ACL reads.
+    dashboard_data["saml_apps"] = get_launchable_saml_apps(user["email"])
+
     return dashboard_data
+
+
+def get_launchable_saml_apps(user_email: str) -> List[Dict[str, Any]]:
+    """Return active SAML apps visible to a user for dashboard launch."""
+    apps = get_all_apps()
+    launchable: List[Dict[str, Any]] = []
+    for app in apps:
+        if app.get("app_type") != APP_TYPE_SAML:
+            continue
+        if not app.get("is_active") or not app.get("saml_enabled"):
+            continue
+
+        try:
+            acl_result = evaluate_app_acl_strict(
+                app=app,
+                user_email=user_email,
+                path="/dashboard",
+            )
+        except AppAclEvaluationError as exc:
+            logger.warning("SAML launcher ACL strict read failed for app=%s: %s", app.get("id"), exc)
+            continue
+
+        if not acl_result.get("allowed"):
+            continue
+
+        launchable.append(
+            {
+                "id": app.get("id"),
+                "name": app.get("name"),
+                "icon": app.get("icon") or "🔐",
+                "saml_entity_id": app.get("saml_entity_id"),
+                "relay_state_hint": "",
+            }
+        )
+
+    launchable.sort(key=lambda item: (item.get("name") or "").lower())
+    return launchable
 
 
 def get_user_pronoun_display(

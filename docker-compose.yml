@@ -46,6 +46,8 @@ services:
       - ./data:/app/data
       # Mount database to app directory for compatibility
       - ./data/users.db:/app/users.db
+      # Mount SAML key material
+      - ./secrets:/run/secrets:ro
     
     restart: unless-stopped
     
@@ -83,7 +85,46 @@ services:
       web:
         condition: service_healthy
 
+  saml-sync:
+    build: .
+    container_name: hack-id-saml-sync
+    command: ["/bin/bash", "/app/scripts/saml_sync_cron.sh"]
+    environment:
+      - PROD=TRUE
+      - SECRET_KEY=${SECRET_KEY}
+      - WORKOS_API_KEY=${WORKOS_API_KEY}
+      - WORKOS_CLIENT_ID=${WORKOS_CLIENT_ID}
+      - TEABLE_API_URL=${TEABLE_API_URL}
+      - TEABLE_ACCESS_TOKEN=${TEABLE_ACCESS_TOKEN}
+      - TEABLE_BASE_ID=${TEABLE_BASE_ID}
+      - TEABLE_TABLE_USERS=${TEABLE_TABLE_USERS}
+      - TEABLE_TABLE_ADMINS=${TEABLE_TABLE_ADMINS}
+      - TEABLE_TABLE_ADMIN_PERMISSIONS=${TEABLE_TABLE_ADMIN_PERMISSIONS}
+      - TEABLE_TABLE_API_KEYS=${TEABLE_TABLE_API_KEYS}
+      - TEABLE_TABLE_APPS=${TEABLE_TABLE_APPS}
+      - TEABLE_TABLE_APP_ACCESS_ENTRIES=${TEABLE_TABLE_APP_ACCESS_ENTRIES}
+      - TEABLE_TABLE_APP_ACCESS_AUDIT=${TEABLE_TABLE_APP_ACCESS_AUDIT}
+      - APP_ACL_MAX_ENTRIES=${APP_ACL_MAX_ENTRIES:-500}
+      - SAML_ENABLED=${SAML_ENABLED:-true}
+      - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID}
+      - SAML_IDP_KEY_ACTIVE_PATH=${SAML_IDP_KEY_ACTIVE_PATH}
+      - SAML_IDP_CERT_ACTIVE_PATH=${SAML_IDP_CERT_ACTIVE_PATH}
+      - SAML_IDP_KEY_NEXT_PATH=${SAML_IDP_KEY_NEXT_PATH}
+      - SAML_IDP_CERT_NEXT_PATH=${SAML_IDP_CERT_NEXT_PATH}
+      - SAML_XMLSEC_BINARY=${SAML_XMLSEC_BINARY:-/usr/bin/xmlsec1}
+      - SAML_METADATA_SYNC_ENABLED=${SAML_METADATA_SYNC_ENABLED:-true}
+      - SAML_METADATA_SYNC_TIMEOUT_SEC=${SAML_METADATA_SYNC_TIMEOUT_SEC:-10}
+      - SAML_METADATA_SYNC_MAX_BYTES=${SAML_METADATA_SYNC_MAX_BYTES:-262144}
+      - SAML_METADATA_SYNC_USER_AGENT=${SAML_METADATA_SYNC_USER_AGENT:-hack-id-saml-sync/1.0}
+    volumes:
+      - ./data:/app/data
+      - ./data/users.db:/app/users.db
+      - ./secrets:/run/secrets:ro
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+
 volumes:
   data:
     driver: local
-

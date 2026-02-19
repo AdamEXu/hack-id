@@ -17,6 +17,7 @@ from utils.events import get_all_events
 from utils.teable import (
     create_record,
     create_records_batch,
+    delete_record,
     delete_records_batch,
     get_records,
     get_records_strict,
@@ -353,11 +354,34 @@ def replace_app_acl_entries(
     if old_ids:
         deleted = delete_records_batch("app_access_entries", old_ids)
         if not deleted:
-            return {
-                "success": False,
-                "error": "Failed to delete previous ACL entries",
-                "reason": "acl_delete_failed",
-            }
+            # Re-read to handle eventual consistency/API quirks where delete may
+            # report failure despite records already gone.
+            try:
+                refreshed_records = get_records_strict("app_access_entries", limit=1000)
+                remaining_ids = {
+                    record.get("id")
+                    for record in refreshed_records
+                    if record.get("fields", {}).get("app_id") == app_id and record.get("id")
+                }
+            except Exception:
+                remaining_ids = set(old_ids)
+
+            undeleted_ids = [record_id for record_id in old_ids if record_id in remaining_ids]
+
+            # Final per-record retry for IDs still present.
+            if undeleted_ids:
+                still_remaining = []
+                for record_id in undeleted_ids:
+                    if not delete_record("app_access_entries", record_id):
+                        still_remaining.append(record_id)
+                undeleted_ids = still_remaining
+
+            if undeleted_ids:
+                return {
+                    "success": False,
+                    "error": f"Failed to delete previous ACL entries: {', '.join(undeleted_ids)}",
+                    "reason": "acl_delete_failed",
+                }
 
     after_json = json.dumps(validated_entries, sort_keys=True)
     create_record(

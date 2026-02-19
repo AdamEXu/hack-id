@@ -291,6 +291,81 @@ TABLES = [
                         {"name": "saml", "color": "green"}
                     ]
                 }
+            },
+            {
+                "name": "saml_metadata_url",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_entity_id",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_acs_url",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_acs_binding",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_slo_url",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_nameid_format",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_attribute_mapping",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "saml_require_signed_authn_request",
+                "type": "checkbox",
+                "options": {}
+            },
+            {
+                "name": "saml_enabled",
+                "type": "checkbox",
+                "options": {}
+            },
+            {
+                "name": "saml_sp_signing_certs_json",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_etag",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_last_fetched_at",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_last_applied_at",
+                "type": "singleLineText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_pending_diff_json",
+                "type": "longText",
+                "options": {}
+            },
+            {
+                "name": "saml_metadata_sync_error",
+                "type": "longText",
+                "options": {}
             }
         ]
     },

@@ -31,6 +31,13 @@ Authorization: Bearer hack.sv.{YOUR_API_KEY}
 -   **Documentation**: [OAuth API](./oauth.md)
 -   **Required Permission**: None for OAuth 2.0 user info (Bearer access token from `/oauth/token`)
 
+### SAML Integration
+
+-   **Endpoints**: `/saml/metadata`, `/saml/sso`, `/saml/slo`, `/saml/apps/<app_id>/launch`
+-   **Purpose**: SAML 2.0 IdP integration for SP-initiated and IdP-initiated SSO, plus SLO
+-   **Documentation**: [SAML API](./saml.md)
+-   **Required Permission**: None for runtime SAML protocol endpoints; admin auth required for app setup and metadata sync endpoints
+
 ### Event Registration
 
 -   **Endpoint**: `/api/register-event`

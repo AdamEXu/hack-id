@@ -101,6 +101,31 @@ block css %}
             <button class="reveal-btn" data-target="profile">Reveal</button>
         </div>
     </div>
+    <!-- Your SAML Apps Section -->
+    <div class="dashboard-section">
+        <div class="section-title">Your SSO Apps</div>
+        {% if dashboard.saml_apps %}
+        <div class="saml-app-list">
+            {% for app in dashboard.saml_apps %}
+            <form
+                method="post"
+                action="/saml/apps/{{ app.id }}/launch"
+                target="_blank"
+                class="saml-app-item"
+            >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <div class="saml-app-label">
+                    <span class="saml-app-icon">{{ app.icon or '🔐' }}</span>
+                    <span>{{ app.name }}</span>
+                </div>
+                <button type="submit" class="join-discord-btn">Launch</button>
+            </form>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="no-events">No SSO apps available for your account</div>
+        {% endif %}
+    </div>
 
     <!-- Delete My Data Section -->
     <div class="dashboard-section">

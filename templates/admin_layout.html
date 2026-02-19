@@ -189,7 +189,7 @@
         <div id="app-modal" class="modal">
             <div class="modal-header app-modal-header">
                 <div>
-                    <h2 id="app-modal-title">Add OAuth 2.0 App</h2>
+                    <h2 id="app-modal-title">Add App</h2>
                     <p class="app-modal-subtitle">Configure metadata, scopes, and who can launch this app.</p>
                 </div>
                 <button class="modal-close" data-modal="app-modal">&times;</button>
@@ -206,6 +206,13 @@
                         <label class="app-field">
                             <span>App name</span>
                             <input type="text" id="app-name" placeholder="My Application" />
+                        </label>
+                        <label class="app-field">
+                            <span>App type</span>
+                            <select id="app-type">
+                                <option value="oauth">OAuth</option>
+                                <option value="saml">SAML</option>
+                            </select>
                         </label>
                         <label class="app-field">
                             <span>Icon</span>
@@ -239,7 +246,7 @@
                     </label>
                 </section>
 
-                <section class="app-modal-section">
+                <section class="app-modal-section" id="oauth-config-section">
                     <div class="app-section-head">
                         <h3>OAuth Configuration</h3>
                         <small>Redirect URI matching is strict and case-sensitive.</small>
@@ -251,7 +258,7 @@
                     </label>
                 </section>
 
-                <section class="permission-section app-modal-section">
+                <section class="permission-section app-modal-section" id="oauth-scopes-section">
                     <div class="permission-section-header app-section-head">
                         <h3>Allowed Scopes</h3>
                         <small>Select the minimum data access required.</small>
@@ -259,6 +266,84 @@
                     <div id="app-scopes" class="permission-grid">
                         <p class="muted">Loading scopes...</p>
                     </div>
+                </section>
+
+                <section class="app-modal-section hidden" id="saml-config-section">
+                    <div class="app-section-head">
+                        <h3>SAML Configuration</h3>
+                        <small>Configure SP metadata and assertion behavior.</small>
+                    </div>
+                    <label class="app-field">
+                        <span>Metadata URL</span>
+                        <input type="text" id="app-saml-metadata-url" placeholder="https://example.com/metadata.xml" />
+                    </label>
+                    <div class="app-modal-grid">
+                        <label class="app-field">
+                            <span>SP Entity ID</span>
+                            <input type="text" id="app-saml-entity-id" placeholder="https://sp.example.com/metadata" />
+                        </label>
+                        <label class="app-field">
+                            <span>ACS URL</span>
+                            <input type="text" id="app-saml-acs-url" placeholder="https://sp.example.com/saml/acs" />
+                        </label>
+                        <label class="app-field">
+                            <span>ACS Binding</span>
+                            <input type="text" id="app-saml-acs-binding" placeholder="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" />
+                        </label>
+                        <label class="app-field">
+                            <span>SLO URL</span>
+                            <input type="text" id="app-saml-slo-url" placeholder="https://sp.example.com/saml/slo" />
+                        </label>
+                        <label class="app-field">
+                            <span>NameID Format</span>
+                            <input type="text" id="app-saml-nameid-format" placeholder="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress" />
+                        </label>
+                    </div>
+                </section>
+
+                <section class="app-modal-section hidden" id="saml-advanced-section">
+                    <div class="app-section-head">
+                        <h3>SAML Advanced</h3>
+                        <small>Attribute mapping and optional SP signing cert overrides.</small>
+                    </div>
+                    <label class="app-field">
+                        <span>Attribute Mapping (JSON array)</span>
+                        <textarea id="app-saml-attribute-mapping" rows="5" placeholder='[{"source_field":"email","saml_name":"email","required":true}]'></textarea>
+                    </label>
+                    <label class="app-field">
+                        <span>SP Signing Certs (JSON array of X509 cert strings)</span>
+                        <textarea id="app-saml-signing-certs" rows="4" placeholder='["MIIC..."]'></textarea>
+                    </label>
+                    <div class="app-toggle-grid">
+                        <label class="app-toggle-card">
+                            <input type="checkbox" id="app-saml-require-signed-request" />
+                            <span class="app-toggle-content">
+                                <strong>Require signed AuthnRequest</strong>
+                                <small>Reject unsigned or invalidly signed SAML AuthnRequests.</small>
+                            </span>
+                        </label>
+                        <label class="app-toggle-card">
+                            <input type="checkbox" id="app-saml-enabled" />
+                            <span class="app-toggle-content">
+                                <strong>Enable SAML runtime</strong>
+                                <small>Allow this app to receive SSO/SLO requests.</small>
+                            </span>
+                        </label>
+                    </div>
+                </section>
+
+                <section class="app-modal-section hidden" id="saml-metadata-actions-section">
+                    <div class="app-section-head">
+                        <h3>Metadata Sync</h3>
+                        <small>Fetch, review, and approve material metadata changes.</small>
+                    </div>
+                    <div class="access-group-row">
+                        <button type="button" class="btn-secondary" id="app-saml-fetch-metadata-btn">Fetch metadata</button>
+                        <button type="button" class="btn-secondary" id="app-saml-approve-metadata-btn">Approve staged</button>
+                        <button type="button" class="btn-secondary" id="app-saml-reject-metadata-btn">Reject staged</button>
+                    </div>
+                    <small id="app-saml-sync-status" class="muted">No sync activity yet.</small>
+                    <div id="app-saml-audit-log" class="log-list"></div>
                 </section>
 
                 <section class="app-modal-section app-toggle-grid">
